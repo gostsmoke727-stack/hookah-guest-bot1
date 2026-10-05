@@ -177,7 +177,7 @@ def save_memory(memory):
     supabase_request("POST", "/rest/v1/guest_memory", body=memory,
                      params="?on_conflict=user_id")
 
-def update_memory(memory, data, profile, recommendations):
+def update_memory(memory, data, profile, recommendations=None, increment_visit=False):
     if data.get("name"):
         memory["name"] = str(data["name"]).strip()
     if data.get("style"):
@@ -190,15 +190,26 @@ def update_memory(memory, data, profile, recommendations):
         memory["usual_strength"] = profile["strength"]
     if profile.get("bowl"):
         memory["usual_bowl"] = profile["bowl"]
-    memory["last_hookahs"] = [
-        r["Бренд"] + " — " + r["Название"] for r in recommendations[:3]
-    ]
+    if recommendations:
+        memory["last_hookahs"] = [
+            r["Бренд"] + " — " + r["Название"] for r in recommendations[:3]
+        ]
     memory["favorite_flavors"] = merge_unique(
         memory.get("favorite_flavors"), profile["desired_terms"]
     )
-    memory["visit_count"] = int(memory.get("visit_count") or 0) + 1
+    if increment_visit:
+        memory["visit_count"] = int(memory.get("visit_count") or 0) + 1
     memory["last_seen"] = now_iso()
     save_memory(memory)
+
+def profile_from_memory(memory):
+    return merge_profile(empty_profile(), {
+        "desired_terms": memory.get("favorite_flavors", []) or memory.get("likes", []),
+        "desired_categories": [],
+        "excluded_terms": memory.get("dislikes", []),
+        "allergies": memory.get("allergies", []),
+        "bowl": memory.get("usual_bowl"), "strength": memory.get("usual_strength"),
+    })
 
 def openrouter_request(system_prompt, user_prompt):
     if not OPENROUTER_API_KEY:
@@ -210,7 +221,7 @@ def openrouter_request(system_prompt, user_prompt):
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.2,
-        "max_tokens": 450,
+        "max_tokens": 280,
     }
     req = urllib.request.Request(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -249,14 +260,16 @@ async def ai_understand(session, user_text):
 
 def canonical_term(term):
     t = norm(term)
-    return {"маракую":"маракуйя", "маракуя":"маракуйя", "пассифлору":"пассифлора"}.get(t, t)
+    aliases = {"маракую":"маракуйя","маракуя":"маракуйя","пассифлору":"пассифлора","трофимов":"trofimoff's","трофимоф":"trofimoff's","trofimoff":"trofimoff's"}
+    return aliases.get(t, t)
 
 def term_matches(row, term):
     t = canonical_term(term)
     fields = [norm(row.get(k, "")) for k in
-              ("Название", "Описание", "Направление", "Категория")]
+              ("Бренд", "Название", "Описание", "Направление", "Категория")]
     aliases = {
         "маракуйя": ["маракуй", "маракуя", "пассифлор", "passion fruit"],
+        "trofimoff's": ["trofimoff", "трофимов", "трофимоф"],
         "pinkman": ["pinkman", "пинкман"],
         "клубничный джем": ["клубничный джем", "strawberry jam"],
         "гуава": ["гуава", "guava"],
@@ -433,8 +446,8 @@ def local_profile_from_text(text):
     ):
         for token in re.split(r"[,;]+|\s+и\s+", match.group(1)):
             token = token.strip()
-            if len(token) > 2:
-                p["excluded_terms"].append(token)
+            if len(token) > 2 and token not in {"табак","вкус","вкусы","кальян"}:
+                p["excluded_terms"].append(canonical_term(token))
     if "класс" in t:
         p["bowl"] = "Классическая чаша"
     if "покреп" in t or "крепк" in t:
@@ -546,7 +559,7 @@ async def handle_turn(bot, message, user_text):
         return
 
     if not session.get("counted"):
-        update_memory(session["memory"], ai or {}, session["profile"], recs)
+        update_memory(session["memory"], ai or {}, session["profile"], recs, increment_visit=True)
         session["counted"] = True
     session["shown"] = merge_unique(session.get("shown"), [r["Бренд"] + " — " + r["Название"] for r in recs])
     session["history"] += [
@@ -554,10 +567,11 @@ async def handle_turn(bot, message, user_text):
         {"role": "assistant", "text": "recommendations"}
     ]
     reply = str((ai or {}).get("reply") or "").strip()
-    pairing_text = build_pairing_text(session["profile"], ASSORTMENT)
+    wants_mix = any(x in norm(user_text) for x in ("микс", "сочетание", "рецепт", "пропорци"))
+    pairing_text = build_pairing_text(session["profile"], ASSORTMENT) if wants_mix else ""
     result_text = build_result(session["profile"], recs, session["memory"], pairing_text)
     if reply:
-        result_text = html.escape(reply) + "\n\n" + result_text
+        result_text = html.escape(reply[:220]) + "\n\n" + result_text
     await message.answer(result_text,
                          reply_markup=keyboard())
 
@@ -570,7 +584,7 @@ async def main():
     @dp.message(CommandStart())
     async def start(message: Message):
         sessions[message.from_user.id] = {
-            "profile": empty_profile(), "history": [],
+            "profile": profile_from_memory(load_memory(message.from_user.id, message)), "history": [],
             "memory": load_memory(message.from_user.id, message), "turns": 0, "shown": [], "counted": False
         }
         name = html.escape(message.from_user.first_name or "гость")
@@ -633,7 +647,6 @@ async def main():
 
     @dp.message(F.voice)
     async def voice(message: Message):
-        await message.answer("🎙️ Слушаю…")
         text = await transcribe_voice(bot, message)
         if text:
             await handle_turn(bot, message, text)
