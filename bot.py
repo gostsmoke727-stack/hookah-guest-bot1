@@ -722,11 +722,13 @@ def menu_keyboard(show_mix=False):
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def keyboard(rows=None):
+def keyboard(rows=None, show_mix=False):
     buttons=[[InlineKeyboardButton(text="🔥 Подобрать",callback_data="new"),InlineKeyboardButton(text="📋 Все команды",callback_data="menu")]]
     if rows:
-        for i,_ in enumerate(rows[:3]): buttons.append([InlineKeyboardButton(text=f"🥣 Выбрать №{i+1}",callback_data=f"pick:{i}")])
-        if len(rows)>=2: buttons.append([InlineKeyboardButton(text="🎯 Собрать сочетание",callback_data="mix")])
+        for i,_ in enumerate(rows[:3]):
+            buttons.append([InlineKeyboardButton(text=f"🥣 Выбрать №{i+1}",callback_data=f"pick:{i}")])
+    if show_mix:
+        buttons.append([InlineKeyboardButton(text="🎯 Собрать сочетание",callback_data="mix")])
     buttons += [[InlineKeyboardButton(text="🧾 Подробный состав",callback_data="details"),InlineKeyboardButton(text="💾 Запомнить",callback_data="remember")],[InlineKeyboardButton(text="🔄 Ещё вариант",callback_data="again"),InlineKeyboardButton(text="🧠 Профиль",callback_data="profile")],[InlineKeyboardButton(text="🧹 Сбросить память",callback_data="forget")]]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -863,7 +865,7 @@ async def handle_turn(bot, message, user_text):
             session["last_mix_rows"] = pairing[1]
             if reply:
                 await message.answer(html.escape(reply[:260]))
-            await send_bowl_photo(message, prefs)
+            await send_bowl_photo(bot, message, prefs)
             await message.answer(
                 build_pairing_text(prefs, pairing[1]) + "\n\nНажми «📋 Подробный состав» — там граммы, забивка, жар, замены и теория.",
                 reply_markup=menu_keyboard(),
@@ -881,7 +883,7 @@ async def handle_turn(bot, message, user_text):
     session["last_mix_rows"] = recs
     show_mix = bool(find_curated_pairing(prefs, recs))
     result_text = (html.escape(reply[:260]) + "\n\n" if reply else "") + build_result(prefs, recs, session["memory"])
-    await message.answer(result_text, reply_markup=menu_keyboard(show_mix=show_mix))
+    await message.answer(result_text, reply_markup=keyboard(recs, show_mix=show_mix))
 
 
 
@@ -936,24 +938,16 @@ async def show_favorites(message):
         lines.append(f"<b>{i}.</b> {html.escape(mix.get('name',''))}")
     await message.answer("\n".join(lines), reply_markup=keyboard())
 
-async def find_bowl_photo(profile):
-    query=bowl_photo_query(profile)
-    url="https://commons.wikimedia.org/w/api.php?"+urllib.parse.urlencode({"action":"query","generator":"search","gsrsearch":query,"gsrnamespace":6,"gsrlimit":5,"prop":"imageinfo","iiprop":"url","iiurlwidth":900,"format":"json","origin":"*"})
-    def fetch():
-        req=urllib.request.Request(url,headers={"User-Agent":"HookahGuestBot/1.0"})
-        with urllib.request.urlopen(req,timeout=8) as response: data=json.loads(response.read().decode())
-        for page in list((data.get("query",{}).get("pages") or {}).values()):
-            info=page.get("imageinfo") or []
-            if info: return info[0].get("thumburl") or info[0].get("url")
-        return None
-    try: return await asyncio.to_thread(fetch)
-    except Exception: return None
+async def send_bowl_photo(bot, message, profile):
+    kind = normalized_bowl(profile)
+    key = "классическая" if kind == "Классическая" else "phunnel"
+    photo_url = BOWL_PHOTOS[key]
+    caption = ("🥣 <b>Классическая египетская чаша</b>\n" if key == "классическая" else "🥣 <b>Phunnel</b>\n") + BOWL_PHOTO_CREDITS[key]
+    try:
+        await bot.send_photo(message.chat.id, photo_url, caption=caption)
+    except Exception:
+        pass
 
-async def send_bowl_photo(bot,message,profile):
-    photo_url=await find_bowl_photo(profile)
-    if photo_url:
-        try: await bot.send_photo(message.chat.id,photo_url,caption=f"🥣 {normalized_bowl(profile)} — пример чаши")
-        except Exception: pass
 
 async def main():
     if not BOT_TOKEN:
@@ -1009,32 +1003,35 @@ async def main():
 
     @dp.callback_query(F.data.startswith("pick:"))
     async def pick_callback(call: CallbackQuery):
-        session=sessions.get(call.from_user.id)
+        session = sessions.get(call.from_user.id)
         if not session or not session.get("last_recs"):
-            await call.answer("Сначала сделай подбор",show_alert=True); return
-        try: index=int(call.data.split(":",1)[1])
-        except (ValueError,IndexError):
-            await call.answer("Не понял выбор",show_alert=True); return
-        rows=session["last_recs"]
-        if index<0 or index>=len(rows):
-            await call.answer("Такого варианта нет",show_alert=True); return
-        selected=[rows[index]]
-        session["last_mix_rows"]=selected
+            await call.answer("Сначала сделай подбор", show_alert=True); return
+        try:
+            index = int(call.data.split(":",1)[1])
+        except (ValueError, IndexError):
+            await call.answer("Не понял выбор", show_alert=True); return
+        rows = session["last_recs"]
+        if index < 0 or index >= len(rows):
+            await call.answer("Такого варианта нет", show_alert=True); return
+        selected = [rows[index]]
+        session["last_mix_rows"] = selected
         await call.answer("Выбрано 👍")
-        await send_bowl_photo(call.bot,call.message,session["profile"])
-        await call.message.answer(detailed_pairing_text(session["profile"],selected),reply_markup=keyboard(selected))
+        await send_bowl_photo(call.bot, call.message, session["profile"])
+        await call.message.answer(detailed_recipe_text(selected, session["profile"]), reply_markup=keyboard(selected))
 
     @dp.callback_query(F.data == "mix")
     async def mix_callback(call: CallbackQuery):
-        session=sessions.get(call.from_user.id)
+        await call.answer()
+        session = sessions.get(call.from_user.id)
         if not session or not session.get("last_recs"):
-            await call.answer("Сначала сделай подбор",show_alert=True); return
-        rows=session["last_recs"]
-        pairing=find_curated_pairing(session["profile"],rows)
-        session["last_mix_rows"]=pairing[1] if pairing else rows[:3]
-        await call.answer("Сочетание готово 👍")
-        await send_bowl_photo(call.bot,call.message,session["profile"])
-        await call.message.answer(detailed_pairing_text(session["profile"],session["last_mix_rows"]),reply_markup=keyboard(session["last_mix_rows"]))
+            await call.message.answer("Сначала сделай подбор.", reply_markup=menu_keyboard()); return
+        pairing = find_curated_pairing(session["profile"], session["last_recs"])
+        if not pairing:
+            await call.message.answer("Для текущих условий нет проверенного сочетания в ассортименте. Пропорции выдумывать не буду.", reply_markup=keyboard(session["last_recs"]))
+            return
+        session["last_mix_rows"] = pairing[1]
+        await send_bowl_photo(call.bot, call.message, session["profile"])
+        await call.message.answer(build_pairing_text(session["profile"], pairing[1]) + "\n\nНажми «📋 Подробный состав» — там граммы, забивка, жар, замены и теория.", reply_markup=keyboard(pairing[1]))
 
     @dp.callback_query(F.data == "profile")
     async def profile_callback(call: CallbackQuery):
@@ -1049,7 +1046,7 @@ async def main():
             await call.answer("Сначала сделай подбор", show_alert=True)
             return
         await call.answer()
-        await send_bowl_photo(call.message, session["profile"])
+        await send_bowl_photo(call.bot, call.message, session["profile"])
         await call.message.answer(
             detailed_recipe_text(session["last_mix_rows"], session["profile"]),
             reply_markup=menu_keyboard(),
@@ -1195,7 +1192,7 @@ async def main():
             if not session or not session.get("last_mix_rows"):
                 await message.answer("Сначала сделай подбор, а потом запроси подробный состав.")
                 return
-            await send_bowl_photo(message, session["profile"])
+            await send_bowl_photo(bot, message, session["profile"])
             await message.answer(
                 detailed_recipe_text(session["last_mix_rows"], session["profile"]),
                 reply_markup=menu_keyboard(),
