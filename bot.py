@@ -645,9 +645,9 @@ def recipe_for_selection(rows, profile):
     if curated:
         pairing, resolved = curated
         return {"name": pairing["name"], "rows": resolved, "ratios": pairing["ratio"], "verified": True, "source": pairing["source"]}
-    selected = rows[:3]
-    ratios = ["100%"] if len(selected) == 1 else (["60%", "40%"] if len(selected) == 2 else ["50%", "30%", "20%"])
-    return {"name": "Авторский подбор", "rows": selected, "ratios": ratios, "verified": False, "source": "расчёт бота по текущему ассортименту"}
+    if len(rows) == 1:
+        return {"name": rows[0]["Бренд"] + " — " + rows[0]["Название"], "rows": rows, "ratios": ["100%"], "verified": False, "source": "соло"}
+    return None
 
 def weighted_strength(rows, ratios):
     vals = []
@@ -1051,20 +1051,6 @@ async def main():
             detailed_recipe_text(session["last_mix_rows"], session["profile"]),
             reply_markup=menu_keyboard(),
         )
-
-    @dp.callback_query(F.data == "mix")
-    async def mix_callback(call: CallbackQuery):
-        await call.answer()
-        session = sessions.get(call.from_user.id)
-        if not session:
-            return
-        pairing = find_curated_pairing(session["profile"], session.get("last_recs") or session.get("last_mix_rows") or [])
-        if not pairing:
-            await call.message.answer("Для текущего запроса нет проверенного сочетания из доступного ассортимента. Я не буду придумывать пропорции.", reply_markup=menu_keyboard())
-            return
-        session["last_mix_rows"] = pairing[1]
-        await send_bowl_photo(call.message, session["profile"])
-        await call.message.answer(build_pairing_text(session["profile"], pairing[1]) + "\n\nНажми «📋 Подробный состав» — там граммы, забивка, жар, замены и теория.", reply_markup=menu_keyboard())
 
     @dp.callback_query(F.data == "remember")
     async def remember_callback(call: CallbackQuery):
