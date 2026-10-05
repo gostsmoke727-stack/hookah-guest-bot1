@@ -664,44 +664,23 @@ def detailed_recipe_text(rows, profile):
     recipe = recipe_for_selection(rows, profile)
     if not recipe:
         return "Не удалось определить состав."
-    lines = [f"<b>📋 Подробный состав — {html.escape(recipe['name'])}</b>", ""]
-    lines.append(f"✅ Опубликованный рецепт: {html.escape(recipe['source'])}" if recipe["verified"] else "🧪 Авторский расчёт по текущему ассортименту — это не опубликованный рецепт.")
-    lines.append("")
-    lines.append("<b>⚖️ Пример на 15 г</b>")
+    lines = [f"<b>🧾 Готовое сочетание — {html.escape(recipe['name'])}</b>", ""]
+    if recipe["verified"]:
+        lines.append(f"✅ <b>Проверенный рецепт:</b> {html.escape(recipe['source'])}")
+    else:
+        lines.append("🧪 <b>Авторский расчёт:</b> пропорции не выдаются за опубликованный рецепт.")
+    lines += ["", "<b>⚖️ Что забивать</b>"]
     for row, ratio in zip(recipe["rows"], recipe["ratios"]):
-        grams = round(15 * int(str(ratio).replace("%", "")) / 100, 1)
-        lines.append(f"• {grams} г — {html.escape(row['Бренд'])} {html.escape(row['Название'])}")
-    lines.append("")
-    for row, ratio in zip(recipe["rows"], recipe["ratios"]):
-        level = row_strength_level(row)
-        lvl = f" · крепость табака ≈ {level}/10" if level else ""
-        lines.append(f"• <b>{ratio}</b> {html.escape(row['Бренд'])} — {html.escape(row['Название'])}{lvl}")
+        pct = ratio_numbers([ratio])[0]
+        grams = round(20 * pct / 100, 1)
+        lines.append(f"• <b>{ratio}</b> — {html.escape(row['Бренд'])} — {html.escape(row['Название'])} → <b>{grams:g} г</b> на чашу 20 г")
     mix_strength = weighted_strength(recipe["rows"], recipe["ratios"])
-    lines += [
-        "",
-        "<b>💪 Расчётная крепость микса</b>",
-        f"{mix_strength}/10 по относительной шкале бота, рассчитанной из крепости компонентов." if mix_strength is not None else "Точно посчитать нельзя: в каталоге не указана крепость всех компонентов.",
-        "Это не лабораторное измерение никотина: реальную никотиновую нагрузку по одному рецепту точно вычислить нельзя.",
-        "",
-        "<b>🔽 Как сделать легче</b>",
-        "Уменьшить долю самого крепкого компонента и заменить её вкусом с более низкой крепостью. Лёгкость по никотину не достигается увеличением жара.",
-        "",
-        "<b>🔼 Как сделать крепче</b>",
-        "Увеличить долю более крепкого компонента или заменить компонент на более крепкий. Не компенсируй слабость только жаром — перегрев даёт горечь и убивает вкус.",
-        "",
-        "<b>🔁 Если компонента нет</b>",
-        "Быстрые замены по роли: клубника → малина/земляника; малина → земляника/смородина; манго → персик/личи; гуава → личи/персик; лимон → лайм; грейпфрут → помело. Это вкусовые аналоги, а не гарантированно идентичные рецептуры.",
-        "После замены бот обязан заново проверить запреты, наличие и расчётную крепость.",
-        "",
-        "<b>🥣 Чаша и забивка</b>",
-        "Для обычных светлых смесей — рыхлая/fluff-забивка до уровня внутреннего бортика, без забивания воздушных каналов. Для плотных тёмных табаков плотность и чаша подбираются отдельно.",
-        "",
-        "<b>🌡️ Жар</b>",
-        "Начинай с умеренного жара и добавляй его постепенно. Если вкус стал жёстким или горьким — сначала снижай жар. Точное количество углей зависит от чаши, HMD, диаметра и табака.",
-        "",
-        "<b>🧩 Смешивание</b>",
-        "Для единого вкуса перемешай компоненты перед забивкой. Для последовательного раскрытия оставь side-by-side. Сильные вкусы держи меньшей долей, чтобы они не забили остальные.",
-    ]
+    lines += ["", f"<b>💪 Крепость:</b> {mix_strength}/10" if mix_strength is not None else "<b>💪 Крепость:</b> не удалось рассчитать", bowl_technique(recipe["rows"], profile), "<b>🔥 Жар:</b> старт умеренный; если жёстко/горчит — снижай, если плоско — добавляй постепенно.", "", "<b>🔽 Легче:</b> уменьши долю самого крепкого компонента и замени её более лёгким аналогом.", "<b>🔼 Крепче:</b> увеличь долю крепкого компонента или замени часть основы на более крепкий табак.", "", "<b>🔁 Замены:</b>"]
+    for row in recipe["rows"]:
+        sub = find_substitute(row, row_strength_level(row))
+        if sub:
+            lines.append(f"• {html.escape(row['Название'])} → {html.escape(sub['Бренд'])} — {html.escape(sub['Название'])}")
+    lines += ["", "<b>📚 Теория</b>", "Крепость — расчётная шкала по компонентам и долям, а не точное измерение никотина.", "Чаша, плотность забивки, влажность табака и жар влияют на раскрытие вкуса и субъективную крепость.", "Если рецепт опубликован, пропорции сохранены без самовольной замены. Если компонент запрещён гостем или отсутствует, рецепт считается неподходящим."]
     return "\n".join(lines)
 
 def remember_current_mix(session):
@@ -876,18 +855,34 @@ async def handle_turn(bot, message, user_text):
     ]
 
     reply = str((ai or {}).get("reply") or "").strip()
-    wants_mix = any(
-        x in norm(user_text)
-        for x in ("микс", "сочетание", "рецепт", "пропорци")
-    )
-    pairing = find_curated_pairing(prefs, recs) if wants_mix else None
-    session["last_mix_rows"] = pairing[1] if pairing else recs
-    pairing_text = build_pairing_text(prefs, recs) if wants_mix else ""
-    result_text = build_result(prefs, recs, session["memory"], pairing_text)
-    if reply:
-        result_text = html.escape(reply[:600]) + "\n\n" + result_text
+    wants_mix = any(x in norm(user_text) for x in ("микс", "сочетание", "рецепт", "пропорци"))
+    pairing = find_curated_pairing(prefs, ASSORTMENT) if wants_mix else None
 
-    await message.answer(result_text, reply_markup=keyboard(recs))
+    if wants_mix:
+        if pairing:
+            session["last_mix_rows"] = pairing[1]
+            if reply:
+                await message.answer(html.escape(reply[:260]))
+            await send_bowl_photo(message, prefs)
+            await message.answer(
+                build_pairing_text(prefs, pairing[1]) + "\n\nНажми «📋 Подробный состав» — там граммы, забивка, жар, замены и теория.",
+                reply_markup=menu_keyboard(),
+            )
+            return
+        session["last_mix_rows"] = recs
+        if reply:
+            await message.answer(html.escape(reply[:260]))
+        await message.answer(
+            "Не нашёл опубликованного сочетания, которое одновременно соблюдает все твои условия и есть в текущем ассортименте. Пропорции выдумывать не буду.",
+            reply_markup=menu_keyboard(),
+        )
+        return
+
+    session["last_mix_rows"] = recs
+    show_mix = bool(find_curated_pairing(prefs, recs))
+    result_text = (html.escape(reply[:260]) + "\n\n" if reply else "") + build_result(prefs, recs, session["memory"])
+    await message.answer(result_text, reply_markup=menu_keyboard(show_mix=show_mix))
+
 
 
 async def show_menu(message):
@@ -1054,10 +1049,25 @@ async def main():
             await call.answer("Сначала сделай подбор", show_alert=True)
             return
         await call.answer()
+        await send_bowl_photo(call.message, session["profile"])
         await call.message.answer(
             detailed_recipe_text(session["last_mix_rows"], session["profile"]),
             reply_markup=menu_keyboard(),
         )
+
+    @dp.callback_query(F.data == "mix")
+    async def mix_callback(call: CallbackQuery):
+        await call.answer()
+        session = sessions.get(call.from_user.id)
+        if not session:
+            return
+        pairing = find_curated_pairing(session["profile"], session.get("last_recs") or session.get("last_mix_rows") or [])
+        if not pairing:
+            await call.message.answer("Для текущего запроса нет проверенного сочетания из доступного ассортимента. Я не буду придумывать пропорции.", reply_markup=menu_keyboard())
+            return
+        session["last_mix_rows"] = pairing[1]
+        await send_bowl_photo(call.message, session["profile"])
+        await call.message.answer(build_pairing_text(session["profile"], pairing[1]) + "\n\nНажми «📋 Подробный состав» — там граммы, забивка, жар, замены и теория.", reply_markup=menu_keyboard())
 
     @dp.callback_query(F.data == "remember")
     async def remember_callback(call: CallbackQuery):
@@ -1185,6 +1195,7 @@ async def main():
             if not session or not session.get("last_mix_rows"):
                 await message.answer("Сначала сделай подбор, а потом запроси подробный состав.")
                 return
+            await send_bowl_photo(message, session["profile"])
             await message.answer(
                 detailed_recipe_text(session["last_mix_rows"], session["profile"]),
                 reply_markup=menu_keyboard(),
