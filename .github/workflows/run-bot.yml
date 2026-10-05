@@ -33,6 +33,29 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Syntax check
+        run: python -m py_compile bot.py
+
+      - name: Check Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          test -n "$BOT_TOKEN" || { echo "BOT_TOKEN secret is not configured"; exit 1; }
+          echo "Checking Telegram credentials..."
+          curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/getMe" | grep -q '"ok":true' || { echo "Telegram BOT_TOKEN check failed"; exit 1; }
+
+      - name: Check Supabase
+        env:
+          SUPABASE_URL: ${{ secrets['SUPABASE_URL'] || 'https://qajbhqrqjhhlxvodnovn.supabase.co' }}
+          SUPABASE_KEY: ${{ secrets['SUPABASE_KEY'] }}
+        run: |
+          if [ -n "$SUPABASE_KEY" ]; then
+            echo "Checking Supabase..."
+            curl -fsS -H "apikey: ${SUPABASE_KEY}" -H "Authorization: Bearer ${SUPABASE_KEY}" "${SUPABASE_URL}/rest/v1/guest_memory?select=user_id&limit=1" >/dev/null || { echo "Supabase check failed"; exit 1; }
+          else
+            echo "Supabase key not configured; running with local session memory."
+          fi
+
       - name: Start bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -41,15 +64,4 @@ jobs:
           SUPABASE_KEY: ${{ secrets['SUPABASE_KEY'] }}
           OPENROUTER_MODEL: openrouter/free
           GEMINI_MODEL: gemini-3.6-flash
-        run: |
-          test -n "$BOT_TOKEN" || { echo "BOT_TOKEN secret is not configured"; exit 1; }
-          echo "Checking Telegram credentials..."
-          curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/getMe" | grep -q '"ok":true' || { echo "Telegram BOT_TOKEN check failed"; exit 1; }
-          if [ -n "$SUPABASE_KEY" ]; then
-            echo "Checking Supabase..."
-            curl -fsS -H "apikey: ${SUPABASE_KEY}" -H "Authorization: Bearer ${SUPABASE_KEY}" "${SUPABASE_URL}/rest/v1/guest_memory?select=user_id&limit=1" >/dev/null || { echo "Supabase check failed"; exit 1; }
-          else
-            echo "Supabase key not configured; running with local session memory."
-          fi
-          python -m py_compile bot.py
-          python bot.py
+        run: python bot.py
