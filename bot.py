@@ -602,17 +602,13 @@ def build_result(profile, rows, memory, pairing_text=""):
     bowl = profile.get("bowl") or memory.get("usual_bowl") or "Классическая чаша"
     level = profile.get("strength_level") or memory.get("strength_level")
     strength = strength_label(level or profile.get("strength") or memory.get("usual_strength") or 5)
-    lines = ["<b>🔥 Подбор на сегодня</b>", ""]
+    lines = ["<b>🔥 Подбор</b>", ""]
     for i, row in enumerate(rows, 1):
-        lines += [card(row, i), ""]
-    lines += [
-        "<b>Параметры</b>",
-        f"🥣 Чаша: {html.escape(str(bowl))}",
-        f"💪 Крепость: {html.escape(str(strength))}"
-    ]
+        lines.append(f"<b>{i}. {html.escape(row['Бренд'])} — {html.escape(row['Название'])}</b> · {html.escape(row.get('Направление',''))} · {html.escape(row.get('Крепость',''))}")
+    lines += ["", f"🥣 {html.escape(str(bowl))}", f"💪 {html.escape(str(strength))}"]
     blocked = merge_unique(profile["excluded_terms"], profile["allergies"])
     if blocked:
-        lines += ["", "<b>🚫 Исключаю</b>", html.escape(", ".join(blocked))]
+        lines.append("🚫 Не предлагаю: " + html.escape(", ".join(blocked[-6:])))
     if pairing_text:
         lines += ["", pairing_text]
     return "\n".join(lines)
@@ -734,12 +730,18 @@ def commands_text():
         "<b>⚙️ Сервис</b>\n• <code>меню</code> — открыть меню команд\n• <code>сбросить</code> — начать с чистого листа"
     )
 
-def menu_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔥 Подобрать", callback_data="new"), InlineKeyboardButton(text="📋 Подробный состав", callback_data="details")],
-        [InlineKeyboardButton(text="🧠 Мой профиль", callback_data="profile"), InlineKeyboardButton(text="🧠 Запомнить", callback_data="remember")],
-        [InlineKeyboardButton(text="🔄 Ещё вариант", callback_data="again"), InlineKeyboardButton(text="🧹 Сбросить", callback_data="forget")]
-    ])
+def menu_keyboard(show_mix=False):
+    rows = [
+        [InlineKeyboardButton(text="🔥 Подобрать", callback_data="new"),
+         InlineKeyboardButton(text="📋 Подробный состав", callback_data="details")],
+    ]
+    if show_mix:
+        rows.append([InlineKeyboardButton(text="🎯 Готовое сочетание", callback_data="mix")])
+    rows += [
+        [InlineKeyboardButton(text="🧠 Мой профиль", callback_data="profile"), InlineKeyboardButton(text="💾 Запомнить", callback_data="remember")],
+        [InlineKeyboardButton(text="🔄 Ещё вариант", callback_data="again"), InlineKeyboardButton(text="🧹 Сбросить", callback_data="forget")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def keyboard(rows=None):
     buttons=[[InlineKeyboardButton(text="🔥 Подобрать",callback_data="new"),InlineKeyboardButton(text="📋 Все команды",callback_data="menu")]]
@@ -759,25 +761,33 @@ def profile_text(memory):
         f"Последнее: {html.escape(', '.join(memory.get('last_hookahs', [])[:3]) or 'пока нет')}"
     )
 
-async def transcribe_voice(bot,message):
-    if not GEMINI_API_KEY: return ""
-    tg_file=await bot.get_file(message.voice.file_id)
-    with tempfile.NamedTemporaryFile(suffix=".ogg",delete=False) as tmp: path=tmp.name
+def _get_whisper_model():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        model_name = os.getenv("WHISPER_MODEL", "base")
+        _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+    return _whisper_model
+
+def _transcribe_local(path):
+    model = _get_whisper_model()
+    segments, _ = model.transcribe(path, language="ru", beam_size=1, best_of=1, temperature=0, condition_on_previous_text=False, vad_filter=True, without_timestamps=True)
+    return " ".join(s.text.strip() for s in segments if s.text.strip()).strip()
+
+async def transcribe_voice(bot, message):
+    tg_file = await bot.get_file(message.voice.file_id)
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        path = tmp.name
     try:
-        await bot.download(tg_file,destination=path)
-        with open(path,"rb") as f: audio_b64=base64.b64encode(f.read()).decode("ascii")
-        payload={"contents":[{"role":"user","parts":[{"text":"Точно расшифруй русскую речь. Сохрани названия вкусов, брендов и разговорные слова. Верни только текст."},{"inline_data":{"mime_type":"audio/ogg","data":audio_b64}}]}],"generationConfig":{"temperature":0,"maxOutputTokens":512}}
-        url="https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key="+urllib.parse.quote(GEMINI_API_KEY)
-        req=urllib.request.Request(url,data=json.dumps(payload).encode(),headers={"Content-Type":"application/json"},method="POST")
-        def request_stt():
-            with urllib.request.urlopen(req,timeout=35) as response: data=json.loads(response.read().decode())
-            parts=data.get("candidates",[{}])[0].get("content",{}).get("parts",[])
-            return "".join(str(p.get("text","")) for p in parts if p.get("text")).strip()
-        return await asyncio.to_thread(request_stt)
-    except Exception: return ""
+        await bot.download(tg_file, destination=path)
+        return await asyncio.to_thread(_transcribe_local, path)
+    except Exception:
+        return ""
     finally:
-        try: os.remove(path)
-        except OSError: pass
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 async def handle_turn(bot, message, user_text):
