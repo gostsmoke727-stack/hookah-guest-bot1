@@ -718,7 +718,7 @@ def local_profile_from_text(text):
     p = empty_profile()
     p["desired_terms"] = []
     if "ягод" in t: p["desired_terms"].append("ягоды")
-    if "тропик" in t: p["desired_terms"].append("тропики")
+    if "тропик" in t or "тропичес" in t: p["desired_terms"].append("тропики")
     if "чай" in t: p["desired_terms"].append("чай")
     for axis in ("сладкое", "кислое", "свежее", "цитрус"):
         if axis in t: p["desired_terms"].append(axis)
