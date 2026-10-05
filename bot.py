@@ -30,6 +30,18 @@ with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
 sessions = {}
 _whisper_model = None
 
+CURATED_PAIRINGS = [
+    {"name":"Raspberry + Pinkman + Grapefruit","terms":["малина","pinkman","грейпфрут"],"ratio":["30%","30%","40%"],"source":"Hookah House"},
+    {"name":"Strawberry Jam + Guava","terms":["клубничный джем","гуава"],"ratio":["70%","30%"],"source":"Fumari"},
+    {"name":"Watermelon + Guava","terms":["арбуз","гуава"],"ratio":["50%","50%"],"source":"Fumari"},
+    {"name":"Watermelon + Strawberry Jam","terms":["арбуз","клубничный джем"],"ratio":["60%","40%"],"source":"Fumari"},
+    {"name":"Strawberry Jam + Banana Custard","terms":["клубничный джем","банан"],"ratio":["40%","60%"],"source":"Fumari"},
+    {"name":"Strawberry Jam + Purple Grape + Watermelon","terms":["клубничный джем","виноград","арбуз"],"ratio":["40%","40%","20%"],"source":"Fumari"},
+    {"name":"Watermelon + Guava + Mint","terms":["арбуз","гуава","мята"],"ratio":["30%","40%","30%"],"source":"Fumari"},
+    {"name":"Strawberry Jam + Limoncello + White Peach","terms":["клубничный джем","лимончелло","белый персик"],"ratio":["20%","60%","20%"],"source":"Fumari"},
+    {"name":"Watermelon + Mojito + Strawberry Jam","terms":["арбуз","мохито","клубничный джем"],"ratio":["20%","30%","50%"],"source":"Fumari"},
+]
+
 AI_SYSTEM = """
 Ты — AI-мастер кальяна премиального заведения.
 Не проводи анкету. Веди короткий естественный диалог и запоминай гостя.
@@ -42,6 +54,8 @@ AI_SYSTEM = """
 5. Максимум один короткий вопрос за ход.
 6. Учитывай всю историю и сохранённую память.
 7. Отвечай по-русски живо, коротко, без анкет и канцелярита.
+8. Если данных достаточно, в reply коротко отреагируй на гостя, но не придумывай факты о составе/наличии.
+9. Не перегружай гостя: максимум одна короткая мысль и один вопрос за ход.
 
 Понимай:
 "не приторное" -> снижай сладость;
@@ -243,6 +257,14 @@ def term_matches(row, term):
               ("Название", "Описание", "Направление", "Категория")]
     aliases = {
         "маракуйя": ["маракуй", "маракуя", "пассифлор", "passion fruit"],
+        "pinkman": ["pinkman", "пинкман"],
+        "клубничный джем": ["клубничный джем", "strawberry jam"],
+        "гуава": ["гуава", "guava"],
+        "виноград": ["виноград", "grape"],
+        "банан": ["банан", "banana"],
+        "лимончелло": ["лимончелло", "limoncello"],
+        "белый персик": ["белый персик", "white peach", "персик"],
+        "мохито": ["мохито", "mojito"],
         "ананас": ["ананас", "pineapple"],
         "мята": ["мят", "mint", "menthol", "ice"],
         "холод": ["холод", "ice", "ментол"],
@@ -311,6 +333,51 @@ def score_candidates(profile, memory):
     scored.sort(key=lambda x: (-x[0], -x[1], norm(x[2]["Название"])))
     return [row for _, _, row in scored]
 
+
+def find_curated_pairing(profile, rows):
+    blocked = merge_unique(profile.get("excluded_terms"), profile.get("allergies"))
+    desired = profile.get("desired_terms", []) + profile.get("desired_categories", [])
+    candidates = []
+    for pairing in CURATED_PAIRINGS:
+        resolved = []
+        used = set()
+        ok = True
+        for term in pairing["terms"]:
+            found = [r for r in rows if term_matches(r, term) and not any(term_matches(r, b) for b in blocked)]
+            found = [r for r in found if (r["Бренд"], r["Название"]) not in used]
+            if not found:
+                ok = False
+                break
+            found.sort(key=lambda r: (norm(r.get("Крепость","")) != "средние", norm(r["Бренд"]), norm(r["Название"])))
+            row = found[0]
+            used.add((row["Бренд"], row["Название"]))
+            resolved.append(row)
+        if not ok:
+            continue
+        if norm(profile.get("freshness")).startswith(("без", "не")) and any(term_matches(r, "мята") for r in resolved):
+            continue
+        score = sum(5 for wanted in desired if any(term_matches(r, wanted) for r in resolved))
+        candidates.append((score, pairing, resolved))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: -x[0])
+    return candidates[0][1], candidates[0][2]
+
+def build_pairing_text(profile, rows):
+    result = find_curated_pairing(profile, rows)
+    if not result:
+        return ""
+    pairing, resolved = result
+    parts = []
+    for i, row in enumerate(resolved):
+        ratio = pairing["ratio"][i] if i < len(pairing["ratio"]) else ""
+        parts.append(f"{ratio} {html.escape(row['Бренд'])} — {html.escape(row['Название'])}".strip())
+    return ("<b>🎯 Готовое сочетание</b>
+" + " + ".join(parts) +
+            f"
+<i>Основа: опубликованный микс {html.escape(pairing['source'])}; "
+            "адаптирован только под позиции из текущего ассортимента.</i>")
+
 def make_recommendations(rows, limit=3, exclude_names=None):
     exclude_names = {norm(x) for x in (exclude_names or [])}
     selected, brands = [], set()
@@ -338,7 +405,7 @@ def card(row, index):
             f"<i>{html.escape(row.get('Категория',''))} · "
             f"{html.escape(row.get('Крепость',''))}</i>")
 
-def build_result(profile, rows, memory):
+def build_result(profile, rows, memory, pairing_text=""):
     bowl = profile.get("bowl") or memory.get("usual_bowl") or "Классическая чаша"
     strength = profile.get("strength") or memory.get("usual_strength") or "Средняя"
     lines = ["<b>Вот что я бы сделал сегодня:</b>", ""]
@@ -486,7 +553,14 @@ async def handle_turn(bot, message, user_text):
         {"role": "user", "text": user_text},
         {"role": "assistant", "text": "recommendations"}
     ]
-    await message.answer(build_result(session["profile"], recs, session["memory"]),
+    reply = str((ai or {}).get("reply") or "").strip()
+    pairing_text = build_pairing_text(session["profile"], ASSORTMENT)
+    result_text = build_result(session["profile"], recs, session["memory"], pairing_text)
+    if reply:
+        result_text = html.escape(reply) + "
+
+" + result_text
+    await message.answer(result_text,
                          reply_markup=keyboard())
 
 async def main():
@@ -513,7 +587,7 @@ async def main():
     async def new_chat(call: CallbackQuery):
         sessions[call.from_user.id] = {
             "profile": empty_profile(), "history": [],
-            "memory": load_memory(call.from_user.id, call.message), "turns": 0
+            "memory": load_memory(call.from_user.id, call.message), "turns": 0, "shown": [], "counted": False
         }
         await call.answer()
         await call.message.answer("Окей. Что хочется сегодня? Можно голосом.")
@@ -551,7 +625,8 @@ async def main():
         session["shown"] = merge_unique(session.get("shown"), [r["Бренд"] + " — " + r["Название"] for r in recs])
         await call.answer()
         if recs:
-            await call.message.answer(build_result(session["profile"], recs, session["memory"]),
+            pairing_text = build_pairing_text(session["profile"], ASSORTMENT)
+            await call.message.answer(build_result(session["profile"], recs, session["memory"], pairing_text),
                                       reply_markup=keyboard())
         else:
             await call.message.answer("Дай ещё одно пожелание — и я докручу подбор.",
