@@ -27,3 +27,4 @@ python bot.py
 
 ## Render
 Создать Worker из репозитория, указать `BOT_TOKEN` в Environment Variables. Build: `pip install -r requirements.txt`. Start: `python bot.py`.
+
