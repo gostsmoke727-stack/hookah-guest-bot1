@@ -25,6 +25,10 @@ export BOT_TOKEN="токен_бота"
 python bot.py
 ```
 
-## Render
-Создать Worker из репозитория, указать `BOT_TOKEN` в Environment Variables. Build: `pip install -r requirements.txt`. Start: `python bot.py`.
+## GitHub Actions
+Workflow запускается автоматически после изменений в `main` и вручную из GitHub Actions. Секреты задаются только в GitHub Actions Secrets:
+- `BOT_TOKEN` — токен Telegram-бота.
+- `OPENROUTER_API_KEY` — ключ OpenRouter для понимания естественного языка.
+- `SUPABASE_URL` и `SUPABASE_KEY` — постоянная память гостя.
 
+Если OpenRouter или Supabase не настроены, бот использует локальный разбор текста и временную память процесса.
