@@ -24,6 +24,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Cache Whisper model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: whisper-base-${{ runner.os }}
       - name: Install dependencies
         run: pip install -r requirements.txt
 
@@ -34,6 +39,7 @@ jobs:
           SUPABASE_URL: ${{ secrets['SUPABASE_URL'] }}
           SUPABASE_KEY: ${{ secrets['SUPABASE_KEY'] }}
           OPENROUTER_MODEL: openrouter/free
+          GEMINI_MODEL: gemini-3.6-flash
         run: |
           test -n "$BOT_TOKEN" || { echo "BOT_TOKEN secret is not configured"; exit 1; }
           python -m py_compile bot.py
