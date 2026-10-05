@@ -7,6 +7,7 @@ create table if not exists public.guest_memory (
   dislikes jsonb not null default '[]'::jsonb,
   allergies jsonb not null default '[]'::jsonb,
   usual_strength text,
+  strength_level integer,
   usual_bowl text,
   favorite_flavors jsonb not null default '[]'::jsonb,
   last_hookahs jsonb not null default '[]'::jsonb,
