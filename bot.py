@@ -25,7 +25,8 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()\nWEBAPP_URL = os.getenv("WEBAPP_URL", "https://cdn.jsdelivr.net/gh/gostsmoke727-stack/hookah-guest-bot1@main/webapp/index.html").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://cdn.jsdelivr.net/gh/gostsmoke727-stack/hookah-guest-bot1@main/webapp/index.html").strip()
 
 with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
     ASSORTMENT = [r for r in csv.DictReader(f) if r.get("Бренд") and r.get("Название")]
