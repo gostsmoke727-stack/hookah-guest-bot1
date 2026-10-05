@@ -106,6 +106,15 @@ def merge_unique(old, new):
             out.append(item)
     return out
 
+def as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return norm(value) in {"true", "1", "yes", "да"}
+    return False
+
 def merge_profile(old, data):
     p = dict(old)
     for key in ("desired_terms", "desired_categories", "excluded_terms", "allergies"):
@@ -338,8 +347,18 @@ async def handle_turn(bot, message, user_text=None, audio_bytes=None):
     if ai:
         session["profile"] = merge_profile(session["profile"], ai)
         reply = (ai.get("reply") or "").strip()
-        ready = bool(ai.get("ready"))
+        ready = as_bool(ai.get("ready"))
         missing = ai.get("missing") or []
+
+        explicit_preferences = (
+            len(session["profile"].get("desired_terms", []))
+            + len(session["profile"].get("desired_categories", []))
+            + len(session["profile"].get("excluded_terms", []))
+            + (1 if session["profile"].get("strength") else 0)
+            + (1 if session["profile"].get("bowl") else 0)
+        )
+        if session["turns"] == 1 and explicit_preferences < 2:
+            ready = False
 
         # Never allow the model to recommend an item itself.
         if not ready and session["turns"] < 4:
