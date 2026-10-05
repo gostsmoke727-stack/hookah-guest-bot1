@@ -32,10 +32,13 @@ jobs:
 
       - name: Start bot
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          OPENROUTER_API_KEY: ${{ secrets['OPENROUTER_API_KEY'] }}
+          BOT_TOKEN: \${{ secrets.BOT_TOKEN }}
+          OPENROUTER_API_KEY: \${{ secrets['OPENROUTER_API_KEY'] }}
+          SUPABASE_URL: \${{ secrets['SUPABASE_URL'] }}
+          SUPABASE_KEY: \${{ secrets['SUPABASE_KEY'] }}
           OPENROUTER_MODEL: openrouter/free
           WHISPER_MODEL: tiny
         run: |
           test -n "$BOT_TOKEN" || { echo "BOT_TOKEN secret is not configured"; exit 1; }
+          python -m py_compile bot.py
           python bot.py
