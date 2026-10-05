@@ -10,6 +10,7 @@ create table if not exists public.guest_memory (
   usual_bowl text,
   favorite_flavors jsonb not null default '[]'::jsonb,
   last_hookahs jsonb not null default '[]'::jsonb,
+  favorite_mixes jsonb not null default '[]'::jsonb,
   visit_count integer not null default 0,
   last_seen timestamptz
 );
