@@ -33,7 +33,9 @@ jobs:
       - name: Start bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          WHISPER_MODEL: base
+          GEMINI_API_KEY: ${{ secrets['GEMINI_API_KEY'] }}
+          GEMINI_MODEL: gemini-2.5-flash-lite
+          WHISPER_MODEL: tiny
         run: |
           test -n "$BOT_TOKEN" || { echo "BOT_TOKEN secret is not configured"; exit 1; }
           python bot.py
