@@ -102,7 +102,7 @@ def empty_memory(user_id, message):
         "style": "дружелюбно",
         "likes": [], "dislikes": [], "allergies": [],
         "usual_strength": None, "usual_bowl": None,
-        "favorite_flavors": [], "favorite_mixes": [], "last_hookahs": [], "favorite_mixes": [],
+        "favorite_flavors": [], "favorite_mixes": [], "last_hookahs": [],
         "visit_count": 0, "last_seen": now_iso()
     }
 
@@ -709,7 +709,7 @@ def profile_text(memory):
         f"<b>🧠 Профиль {html.escape(memory.get('name') or 'гостя')}</b>\n\n"
         f"Любит: {html.escape(', '.join(memory.get('likes', [])[:8]) or 'пока не знаю')}\n"
         f"Не любит: {html.escape(', '.join(memory.get('dislikes', [])[:8]) or 'пока не знаю')}\n"
-        f"Крепость: {html.escape(str(memory.get('usual_strength') or 'не знаю'))}\n"
+        f"Крепость: {html.escape(str(memory.get('usual_strength') or 'не знаю'))} / {html.escape(str(memory.get('strength_level') or '—'))}/10\n"
         f"Чаша: {html.escape(str(memory.get('usual_bowl') or 'не знаю'))}\n"
         f"Последнее: {html.escape(', '.join(memory.get('last_hookahs', [])[:3]) or 'пока нет')}"
     )
