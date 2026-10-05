@@ -1,265 +1,381 @@
 import asyncio
+import base64
 import csv
+import json
 import os
-import random
 import re
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message
-from faster_whisper import WhisperModel
 
 BASE = Path(__file__).resolve().parent
 CSV_PATH = BASE / "data" / "assortment.csv"
 
-KEYWORDS = {
-    "слад": "СЛАДКИЙ", "сладко": "СЛАДКИЙ",
-    "кисл": "КИСЛЫЙ", "кисло-слад": "КИСЛО-СЛАДКИЙ",
-    "свеж": "СВЕЖИЙ", "прян": "ПРЯНЫЙ",
-    "нейтр": "НЕЙТРАЛЬНЫЙ", "солен": "СОЛЕНЫЙ",
-    "фрукт": "Фрукты", "ягод": "Ягодные", "ягодн": "Ягодные",
-    "цитрус": "Цитрусовые", "десерт": "Десертные", "десер": "Десертные",
-    "трав": "Травяные", "цвет": "Цветочные", "спец": "Специи",
-    "напит": "Напитки", "чай": "Чайные",
-    "креп": "Крепкие", "крепкий": "Крепкие",
-    "легк": "Легкие", "мягк": "Легкие", "средн": "Средние",
-}
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+LOCAL_WHISPER_MODEL = os.getenv("WHISPER_MODEL", "tiny")
 
-STRENGTH_WORDS = {
-    "лег": "Легкие", "мяг": "Легкие",
-    "сред": "Средние", "креп": "Крепкие", "силь": "Крепкие",
-}
-
-BOWL_WORDS = {
-    "арбуз": "Арбуз", "дын": "Дыня", "грейп": "Грейпфрут",
-    "ананас": "Ананас", "гранат": "Гранат",
-    "класс": "Классическая чаша", "обыч": "Классическая чаша",
-    "классичес": "Классическая чаша",
-}
-
-FREQUENCY_WORDS = (
-    "каждый день", "каждый вечер", "ежедневно", "часто", "регулярно",
-    "раз в неделю", "раза в неделю", "несколько раз в неделю",
-    "раз в месяц", "редко", "иногда", "пару раз", "первый раз",
-)
-
-def load_assortment():
-    with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
-        return [r for r in csv.DictReader(f) if r.get("Бренд") and r.get("Название")]
-
-ASSORTMENT = load_assortment()
-
-# Small, CPU-friendly model. It supports Russian and keeps the bot self-contained.
-WHISPER_MODEL = WhisperModel(
-    os.getenv("WHISPER_MODEL", "base"),
-    device="cpu",
-    compute_type="int8",
-)
+with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
+    ASSORTMENT = [r for r in csv.DictReader(f) if r.get("Бренд") and r.get("Название")]
 
 sessions = {}
+_whisper_model = None
 
+CATEGORIES = [
+    "СЛАДКИЙ", "КИСЛЫЙ", "КИСЛО-СЛАДКИЙ", "СВЕЖИЙ", "ПРЯНЫЙ",
+    "НЕЙТРАЛЬНЫЙ", "СОЛЕНЫЙ", "Фрукты", "Ягодные", "Цитрусовые",
+    "Десертные", "Травяные", "Цветочные", "Специи", "Напитки", "Чайные", "Крепкие"
+]
+BOWLS = ["Арбуз", "Дыня", "Грейпфрут", "Ананас", "Гранат", "Классическая чаша"]
+
+AI_SYSTEM = """
+Ты — AI-администратор кальянного заведения. Общайся по-русски живо, коротко и естественно,
+как хороший кальянный мастер: без длинных анкет и канцелярита.
+
+Твоя задача — понять гостя и собрать профиль для подбора из реального ассортимента.
+
+КРИТИЧЕСКОЕ ПРАВИЛО: различай "хочу" и "не хочу".
+Фразы "не люблю ананас", "без ананаса", "ананас не надо",
+"аллергия на ананас" НИКОГДА не записывай как желаемый вкус.
+Аллергии и явные запреты — абсолютные исключения.
+
+Понимай разговорные формулировки:
+"ягоды с тропиками", "что-нибудь свежее", "не приторное", "покрепче",
+"мягко", "часто курю", "редко курю", "на классике", "на фрукте".
+"Классика/классическая чаша" = классическая чаша.
+
+Если гость говорит несколько пожеланий в одном сообщении, извлеки все сразу.
+Не выдумывай наличие вкуса или ингредиента. Реальные позиции выбираются отдельно из CSV.
+
+На каждом ходе верни ТОЛЬКО JSON:
+{
+  "reply": "короткий естественный ответ гостю",
+  "desired_terms": ["ягоды", "тропики"],
+  "desired_categories": ["Ягодные", "Фрукты"],
+  "excluded_terms": ["ананас", "маракуйя"],
+  "allergies": [],
+  "bowl": "Классическая чаша",
+  "strength": "Средние",
+  "frequency": "иногда",
+  "ready": false,
+  "missing": ["крепость"],
+  "clarifying_question": "Какую крепость предпочитаешь — лёгкую, среднюю или покрепче?"
+}
+
+Обновляй поля с учётом ВСЕЙ истории и текущего профиля, не затирай уже найденные ограничения.
+Если информации достаточно — ready=true и missing=[].
+Если не хватает только несущественной детали, не мучай гостя вопросами: ready=true.
+Максимум один короткий вопрос за ход.
+"""
+
+def norm(s):
+    return re.sub(r"\s+", " ", str(s or "").strip().lower())
+
+def empty_profile():
+    return {
+        "desired_terms": [],
+        "desired_categories": [],
+        "excluded_terms": [],
+        "allergies": [],
+        "bowl": None,
+        "strength": None,
+        "frequency": None,
+    }
 
 def get_session(user_id):
-    return sessions.setdefault(user_id, {"step": 1, "answers": {}})
-
+    return sessions.setdefault(user_id, {
+        "profile": empty_profile(),
+        "history": [],
+        "turns": 0,
+    })
 
 def reset_session(user_id):
-    sessions[user_id] = {"step": 1, "answers": {}}
+    sessions[user_id] = {"profile": empty_profile(), "history": [], "turns": 0}
     return sessions[user_id]
 
+def merge_unique(old, new):
+    out = list(old or [])
+    for item in new or []:
+        item = str(item).strip()
+        if item and norm(item) not in {norm(x) for x in out}:
+            out.append(item)
+    return out
 
-def normalize(text):
-    return re.sub(r"\s+", " ", (text or "").strip().lower())
+def merge_profile(old, data):
+    p = dict(old)
+    for key in ("desired_terms", "desired_categories", "excluded_terms", "allergies"):
+        p[key] = merge_unique(p.get(key), data.get(key))
+    for key in ("bowl", "strength", "frequency"):
+        value = data.get(key)
+        if value and str(value).strip().lower() not in ("null", "none"):
+            p[key] = value
+    return p
 
-
-def detect_strength(text):
-    t = normalize(text)
-    for word, value in STRENGTH_WORDS.items():
-        if word in t:
-            return value
-    return None
-
-
-def detect_bowl(text):
-    t = normalize(text)
-    for word, value in BOWL_WORDS.items():
-        if word in t:
-            return value
-    return None
-
-
-def detect_frequency(text):
-    t = normalize(text)
-    for phrase in FREQUENCY_WORDS:
-        if phrase in t:
-            return t
-    return t
-
-
-def candidates(profile):
-    taste = normalize(profile["taste"])
-    dislikes = normalize(profile["dislikes"])
-    strength = profile.get("strength")
-    t = f"{taste} {profile.get('frequency', '')}".lower()
-
-    wanted = {v for k, v in KEYWORDS.items() if k in t}
-    disliked_words = [w for w in re.findall(r"[а-яёa-z0-9-]+", dislikes) if len(w) >= 3]
-
-    scored = []
-    for row in ASSORTMENT:
-        category = normalize(row.get("Категория", ""))
-        direction = normalize(row.get("Направление", ""))
-        row_strength = normalize(row.get("Крепость", ""))
-        name = normalize(row.get("Название", ""))
-        description = normalize(row.get("Описание", ""))
-
-        score = 0
-
-        for field in (category, direction, row_strength):
-            if any(normalize(w) in field or field in normalize(w) for w in wanted):
-                score += 3
-
-        if strength and normalize(strength) in row_strength:
-            score += 4
-
-        if strength == "Легкие" and any(x in row_strength for x in ("легк", "мяг")):
-            score += 3
-        if strength == "Средние" and "сред" in row_strength:
-            score += 3
-        if strength == "Крепкие" and ("креп" in row_strength or "креп" in category):
-            score += 3
-
-        for word in re.findall(r"[а-яёa-z0-9-]+", taste):
-            if len(word) >= 4 and (word in name or word in description or word in direction):
-                score += 2
-
-        if any(word in name or word in description or word in category or word in direction
-               for word in disliked_words):
-            score -= 10
-
-        if score > 0:
-            scored.append((score, row))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [r for _, r in scored]
-
-
-def make_variants(rows):
-    rows = rows[:15]
-    random.shuffle(rows)
-    if len(rows) < 6:
+def gemini_request(parts):
+    if not GEMINI_API_KEY:
+        return None
+    payload = {
+        "system_instruction": {"parts": [{"text": AI_SYSTEM}]},
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "temperature": 0.15,
+            "responseMimeType": "application/json",
+        },
+    }
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + GEMINI_MODEL
+        + ":generateContent"
+    )
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as response:
+            raw = response.read().decode("utf-8")
+        data = json.loads(raw)
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text)
+    except Exception:
         return None
 
-    groups = [rows[0:3], rows[3:6], rows[6:9]]
-    names = ["Сочный микс", "Яркий баланс", "Необычный микс"]
-    out = []
+async def ai_understand(session, user_text=None, audio_bytes=None, mime_type="audio/ogg"):
+    profile_json = json.dumps(session["profile"], ensure_ascii=False)
+    history = json.dumps(session["history"][-8:], ensure_ascii=False)
 
-    for name, group in zip(names, groups):
-        lines = [f"🔥 Вариант — «{name}»"]
-        for r in group:
-            lines.append(f'• {r["Бренд"]} — {r["Название"]}')
-        out.append("\n".join(lines))
+    context = (
+        "ТЕКУЩИЙ ПРОФИЛЬ:\\n" + profile_json +
+        "\\nИСТОРИЯ ДИАЛОГА:\\n" + history +
+        "\\nСделай следующий ход диалога."
+    )
 
-    return "\n\n".join(out)
+    if audio_bytes is not None:
+        parts = [
+            {"text": context + """
+Это голосовое сообщение гостя. Сначала точно пойми его смысл и извлеки все пожелания.
+Не показывай расшифровку гостю. Ответь коротко и естественно."""},
+            {"inlineData": {
+                "mimeType": mime_type,
+                "data": base64.b64encode(audio_bytes).decode("ascii"),
+            }},
+        ]
+    else:
+        parts = [{"text": context + "\\nСООБЩЕНИЕ ГОСТЯ:\\n" + (user_text or "")}]
 
+    result = await asyncio.to_thread(gemini_request, parts)
+    if result:
+        return result
 
-async def transcribe_voice(bot, message):
-    voice = message.voice
-    tg_file = await bot.get_file(voice.file_id)
+    return None
 
+def load_local_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        _whisper_model = WhisperModel(
+            LOCAL_WHISPER_MODEL,
+            device="cpu",
+            compute_type="int8",
+        )
+    return _whisper_model
+
+async def local_transcribe(path):
+    model = await asyncio.to_thread(load_local_whisper)
+    segments, _ = await asyncio.to_thread(
+        model.transcribe, path, language="ru", vad_filter=True, beam_size=1
+    )
+    return " ".join(s.text.strip() for s in segments).strip()
+
+async def transcribe_voice_fallback(bot, message):
+    tg_file = await bot.get_file(message.voice.file_id)
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
         path = tmp.name
-
     try:
         await bot.download(tg_file, destination=path)
-        segments, _ = WHISPER_MODEL.transcribe(
-            path,
-            language="ru",
-            vad_filter=True,
-            beam_size=5,
-        )
-        text = " ".join(segment.text.strip() for segment in segments).strip()
-        return text
+        return await local_transcribe(path)
     finally:
         try:
             os.remove(path)
         except OSError:
             pass
 
+def term_matches(row, term):
+    t = norm(term)
+    if not t:
+        return False
+    fields = [
+        norm(row.get("Название", "")),
+        norm(row.get("Описание", "")),
+        norm(row.get("Направление", "")),
+        norm(row.get("Категория", "")),
+    ]
+    aliases = {
+        "маракуйя": ["маракуйя", "пассифлора", "passion fruit"],
+        "ананас": ["ананас", "pineapple"],
+        "ягоды": ["ягод", "клубник", "малина", "черник", "смородин", "ежевик", "вишн", "черешн"],
+        "тропики": ["троп", "манго", "маракуй", "ананас", "кокос", "папай", "личи", "гуав"],
+        "цитрус": ["цитрус", "лимон", "лайм", "апельс", "грейп", "мандар"],
+        "свежее": ["свеж", "мята", "холод", "ice"],
+        "сладкое": ["слад", "десерт"],
+    }
+    needles = aliases.get(t, [t])
+    return any(any(n in field for n in needles) for field in fields)
 
-async def get_user_text(bot, message):
-    if message.text:
-        return message.text.strip()
+def score_candidates(profile):
+    desired_terms = profile.get("desired_terms", [])
+    desired_categories = profile.get("desired_categories", [])
+    excluded = merge_unique(profile.get("excluded_terms"), profile.get("allergies"))
+    strength = norm(profile.get("strength"))
 
-    if message.voice:
-        await message.answer("🎙️ Секунду, распознаю голосовое…")
-        text = await transcribe_voice(bot, message)
-        if not text:
-            await message.answer("Не получилось разобрать голосовое. Запиши ещё раз или напиши текстом.")
-            return None
-        return text
+    scored = []
+    for row in ASSORTMENT:
+        # Hard exclusions ALWAYS win.
+        if any(term_matches(row, term) for term in excluded):
+            continue
 
-    return None
+        score = 0
+        category = norm(row.get("Категория", ""))
+        direction = norm(row.get("Направление", ""))
+        row_strength = norm(row.get("Крепость", ""))
 
+        for wanted in desired_categories:
+            w = norm(wanted)
+            if w and (w in category or w in direction):
+                score += 8
 
-async def ask_step(message, step):
-    if step == 1:
-        await message.answer(
-            "Что бы ты хотел(а) сегодня покурить? 🎯\n\n"
-            "Можешь написать или записать голосовое. Например: сладкое, ягодное, "
-            "свежее, кислое, фруктовое, десертное, пряное — или просто опиши вкус своими словами."
-        )
-    elif step == 2:
-        await message.answer(
-            "Как часто ты куришь кальян и какую крепость предпочитаешь? 💨\n\n"
-            "Можно ответить одним сообщением или голосовым: редко / иногда / часто / "
-            "каждую неделю и лёгкий / средний / крепкий."
-        )
-    elif step == 3:
-        await message.answer(
-            "Есть вкусы или ингредиенты, которые ты не любишь или точно не хочешь? "
-            "И какую чашу выбираем? 🍉\n\n"
-            "Можно на фруктовой: арбуз, дыня, грейпфрут, ананас или гранат — "
-            "либо на классической чаше. Ответь текстом или голосовым."
-        )
+        for wanted in desired_terms:
+            if term_matches(row, wanted):
+                score += 7
 
+        if strength:
+            if strength in row_strength:
+                score += 7
+            elif strength.startswith("лег") and "лег" in row_strength:
+                score += 6
+            elif strength.startswith("сред") and "сред" in row_strength:
+                score += 6
+            elif strength.startswith("креп") and "креп" in row_strength:
+                score += 6
 
-async def finish_recommendation(message, profile):
-    rows = candidates(profile)
-    answer = make_variants(rows)
+        # A result with no positive taste match is not allowed unless the guest
+        # gave no taste preference at all.
+        if desired_terms or desired_categories:
+            if score < 7:
+                continue
 
-    if not answer:
-        # Fallback: use all assortment but still respect explicit dislikes where possible.
-        rows = [r for r in ASSORTMENT if not any(
-            word in normalize(r.get("Название", "")) or
-            word in normalize(r.get("Описание", "")) or
-            word in normalize(r.get("Направление", ""))
-            for word in re.findall(r"[а-яёa-z0-9-]+", normalize(profile["dislikes"]))
-            if len(word) >= 3
-        )]
-        answer = make_variants(rows)
+        scored.append((score, row))
 
-    bowl = profile.get("bowl", "Классическая чаша")
-    strength = profile.get("strength") or "по предпочтению гостя"
+    scored.sort(key=lambda x: (-x[0], norm(x[1].get("Название", ""))))
+    return [row for _, row in scored]
 
-    if answer:
-        await message.answer(
-            "Подобрал варианты под твой запрос. 🔥\n\n"
-            f"{answer}\n\n"
-            f"🍉 Чаша: {bowl}\n"
-            f"💪 Крепость: {strength}\n\n"
-            "Если хочешь, могу подобрать ещё варианты — слаще, кислее, свежее или крепче."
-        )
-    else:
-        await message.answer(
-            "В точном сочетании не нашёл достаточно вариантов в текущем ассортименте. "
-            "Могу предложить ближайшие по вкусу варианты — напиши «ещё»."
-        )
+def make_recommendations(rows, limit=3):
+    selected = []
+    used_brands = set()
+    for row in rows:
+        brand = row.get("Бренд", "")
+        if len(selected) < limit and brand not in used_brands:
+            selected.append(row)
+            used_brands.add(brand)
+    if len(selected) < limit:
+        for row in rows:
+            if row not in selected:
+                selected.append(row)
+                if len(selected) >= limit:
+                    break
+    return selected[:limit]
 
-    sessions.pop(message.from_user.id, None)
+def build_result(profile, rows):
+    bowl = profile.get("bowl") or "Классическая чаша"
+    strength = profile.get("strength") or "Средняя"
+    lines = [
+        "🔥 Подобрал под твой запрос:",
+        f"🍉 Чаша: {bowl}",
+        f"💪 Крепость: {strength}",
+        "",
+    ]
+    for i, row in enumerate(make_recommendations(rows), 1):
+        lines.append(f"{i}. {row['Бренд']} — {row['Название']}")
+    if profile.get("excluded_terms") or profile.get("allergies"):
+        blocked = merge_unique(profile.get("excluded_terms"), profile.get("allergies"))
+        lines.append("")
+        lines.append("🚫 Исключил: " + ", ".join(blocked))
+    lines.append("")
+    lines.append("Если хочешь — можем докрутить вкус: слаще, свежее, кислее или крепче.")
+    return "\\n".join(lines)
 
+def local_profile_from_text(text):
+    # Safety fallback only when AI key is unavailable.
+    t = norm(text)
+    p = empty_profile()
+    p["desired_terms"] = [x for x in ["ягоды", "тропики", "сладкое", "кислое", "свежее"] if x in t]
+    p["excluded_terms"] = re.findall(
+        r"(?:не хочу|не люблю|без|не надо|аллергия на)\\s+([а-яёa-z-]+)", t
+    )
+    for bowl in BOWLS:
+        if norm(bowl) in t or (bowl == "Классическая чаша" and "класс" in t):
+            p["bowl"] = bowl
+    if "креп" in t or "покрепче" in t:
+        p["strength"] = "Крепкие"
+    elif "легк" in t or "мяг" in t:
+        p["strength"] = "Легкие"
+    elif "сред" in t:
+        p["strength"] = "Средние"
+    return p
+
+async def handle_turn(bot, message, user_text=None, audio_bytes=None):
+    session = get_session(message.from_user.id)
+    session["turns"] += 1
+
+    ai = await ai_understand(session, user_text=user_text, audio_bytes=audio_bytes)
+    if ai:
+        session["profile"] = merge_profile(session["profile"], ai)
+        reply = (ai.get("reply") or "").strip()
+        ready = bool(ai.get("ready"))
+        missing = ai.get("missing") or []
+
+        # Never allow the model to recommend an item itself.
+        if not ready and session["turns"] < 4:
+            question = (ai.get("clarifying_question") or reply).strip()
+            if question:
+                session["history"].append({"role": "user", "text": user_text or "[голосовое]"})
+                session["history"].append({"role": "assistant", "text": question})
+                await message.answer(question)
+                return
+        rows = score_candidates(session["profile"])
+        if rows:
+            await message.answer(build_result(session["profile"], rows))
+        else:
+            await message.answer(
+                "Я понял запрос, но в текущем ассортименте нет позиции, которая одновременно "
+                "подходит по вкусу и не нарушает твои запреты. Давай чуть изменим вкус — "
+                "например, добавим соседнее ягодное или фруктовое направление."
+            )
+        sessions.pop(message.from_user.id, None)
+        return
+
+    # AI unavailable: keep the bot usable, but do not pretend it is AI.
+    if user_text:
+        fallback = local_profile_from_text(user_text)
+        session["profile"] = merge_profile(session["profile"], fallback)
+        rows = score_candidates(session["profile"])
+        if rows:
+            await message.answer(build_result(session["profile"], rows))
+            sessions.pop(message.from_user.id, None)
+            return
+    await message.answer(
+        "Сейчас AI не отвечает. Напиши пожелания текстом ещё раз — я попробую подобрать из ассортимента."
+    )
 
 async def main():
     token = os.getenv("BOT_TOKEN")
@@ -273,43 +389,42 @@ async def main():
     async def start(message: Message):
         reset_session(message.from_user.id)
         await message.answer(
-            "Привет! 👋\n"
-            "Я помогу подобрать кальян именно под твой вкус. "
-            "Можно отвечать обычным текстом или голосовыми сообщениями."
+            "Привет! 👋 Я помогу подобрать кальян под твой вкус. "
+            "Можно писать или отправлять голосовые.\n\n"
+            "Что сегодня хочется покурить? Опиши вкус как удобно — "
+            "например, ягоды, тропики, сладкое, свежее, кислое или что-то своё."
         )
-        await ask_step(message, 1)
 
-    @dp.message(F.text | F.voice)
-    async def dialog(message: Message):
-        user_id = message.from_user.id
-        session = get_session(user_id)
-        text = await get_user_text(bot, message)
+    @dp.message(F.voice)
+    async def voice(message: Message):
+        if GEMINI_API_KEY:
+            await message.answer("🎙️ Слушаю…")
+            tg_file = await bot.get_file(message.voice.file_id)
+            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+                path = tmp.name
+            try:
+                await bot.download(tg_file, destination=path)
+                with open(path, "rb") as f:
+                    audio = f.read()
+                await handle_turn(bot, message, audio_bytes=audio, user_text=None)
+            finally:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        else:
+            await message.answer("🎙️ Секунду…")
+            text = await transcribe_voice_fallback(bot, message)
+            if text:
+                await handle_turn(bot, message, user_text=text)
+            else:
+                await message.answer("Не разобрал голосовое. Попробуй ещё раз или напиши текстом.")
 
-        if not text:
-            return
-
-        step = session["step"]
-
-        if step == 1:
-            session["answers"]["taste"] = text
-            session["step"] = 2
-            await ask_step(message, 2)
-            return
-
-        if step == 2:
-            session["answers"]["frequency"] = detect_frequency(text)
-            session["answers"]["strength"] = detect_strength(text)
-            session["step"] = 3
-            await ask_step(message, 3)
-            return
-
-        if step == 3:
-            session["answers"]["dislikes"] = text
-            session["answers"]["bowl"] = detect_bowl(text) or "Классическая чаша"
-            await finish_recommendation(message, session["answers"])
+    @dp.message(F.text)
+    async def text_message(message: Message):
+        await handle_turn(bot, message, user_text=message.text.strip())
 
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
