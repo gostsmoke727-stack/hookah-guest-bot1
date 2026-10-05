@@ -110,6 +110,9 @@ def merge_profile(old, data):
     p = dict(old)
     for key in ("desired_terms", "desired_categories", "excluded_terms", "allergies"):
         p[key] = merge_unique(p.get(key), data.get(key))
+    # Explicit exclusions always win over positive preferences.
+    blocked = {norm(x) for x in (p.get("excluded_terms") or []) + (p.get("allergies") or [])}
+    p["desired_terms"] = [x for x in p.get("desired_terms", []) if norm(x) not in blocked]
     for key in ("bowl", "strength", "frequency"):
         value = data.get(key)
         if value and str(value).strip().lower() not in ("null", "none"):
@@ -127,7 +130,6 @@ def openrouter_request(user_prompt):
         ],
         "temperature": 0.15,
         "max_tokens": 350,
-        "response_format": {"type": "json_object"},
     }
     url = "https://openrouter.ai/api/v1/chat/completions"
     req = urllib.request.Request(
@@ -146,7 +148,18 @@ def openrouter_request(user_prompt):
             raw = response.read().decode("utf-8")
         data = json.loads(raw)
         text = data["choices"][0]["message"]["content"]
-        return json.loads(text)
+        if isinstance(text, dict):
+            return text
+        text = str(text).strip()
+        # Free models sometimes wrap JSON in markdown fences.
+        if text.startswith("```"):
+            text = re.sub(r"^\`\`\`(?:json)?\\s*", "", text, flags=re.I)
+            text = re.sub(r"\\s*\`\`\`$", "", text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\\{.*\\}", text, flags=re.S)
+            return json.loads(match.group(0)) if match else None
     except Exception:
         return None
 
