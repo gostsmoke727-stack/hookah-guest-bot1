@@ -1,0 +1,4 @@
+  File "bot.py", line 28
+    SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()\nWEBAPP_URL = os.getenv("WEBAPP_URL", "https://cdn.jsdelivr.net/gh/gostsmoke727-stack/hookah-guest-bot1@main/webapp/index.html").strip()
+                                                         ^
+SyntaxError: unexpected character after line continuation character
