@@ -605,7 +605,7 @@ def local_profile_from_text(text):
 def recipe_for_selection(rows, profile):
     if not rows:
         return None
-    curated = find_curated_pairing(profile, ASSORTMENT)
+    curated = resolve_pairing_for_rows(rows)
     if curated:
         pairing, resolved = curated
         return {"name": pairing["name"], "rows": resolved, "ratios": pairing["ratio"], "verified": True, "source": pairing["source"]}
@@ -844,7 +844,7 @@ async def handle_turn(bot, message, user_text):
         for x in ("микс", "сочетание", "рецепт", "пропорци")
     )
     pairing = find_curated_pairing(prefs, ASSORTMENT) if wants_mix else None
-    session["last_mix_rows"] = pairing[1] if pairing else []
+    session["last_mix_rows"] = pairing[1] if pairing else recs
     pairing_text = build_pairing_text(prefs, ASSORTMENT) if wants_mix else ""
     result_text = build_result(prefs, recs, session["memory"], pairing_text)
     if reply:
