@@ -233,12 +233,16 @@ async def ai_understand(session, user_text):
     )
     return await asyncio.to_thread(openrouter_request, AI_SYSTEM, prompt)
 
-def term_matches(row, term):
+def canonical_term(term):
     t = norm(term)
+    return {"маракую":"маракуйя", "маракуя":"маракуйя", "пассифлору":"пассифлора"}.get(t, t)
+
+def term_matches(row, term):
+    t = canonical_term(term)
     fields = [norm(row.get(k, "")) for k in
               ("Название", "Описание", "Направление", "Категория")]
     aliases = {
-        "маракуйя": ["маракуй", "пассифлор", "passion fruit"],
+        "маракуйя": ["маракуй", "маракуя", "пассифлор", "passion fruit"],
         "ананас": ["ананас", "pineapple"],
         "мята": ["мят", "mint", "menthol", "ice"],
         "холод": ["холод", "ice", "ментол"],
@@ -307,9 +311,12 @@ def score_candidates(profile, memory):
     scored.sort(key=lambda x: (-x[0], -x[1], norm(x[2]["Название"])))
     return [row for _, _, row in scored]
 
-def make_recommendations(rows, limit=3):
+def make_recommendations(rows, limit=3, exclude_names=None):
+    exclude_names = {norm(x) for x in (exclude_names or [])}
     selected, brands = [], set()
     for row in rows:
+        if norm(row["Бренд"] + " — " + row["Название"]) in exclude_names:
+            continue
         if row["Бренд"] not in brands:
             selected.append(row)
             brands.add(row["Бренд"])
@@ -317,6 +324,8 @@ def make_recommendations(rows, limit=3):
             break
     if len(selected) < limit:
         for row in rows:
+            if norm(row["Бренд"] + " — " + row["Название"]) in exclude_names:
+                continue
             if row not in selected:
                 selected.append(row)
             if len(selected) >= limit:
@@ -417,7 +426,7 @@ async def transcribe_voice(bot, message):
 async def handle_turn(bot, message, user_text):
     session = sessions.setdefault(message.from_user.id, {
         "profile": empty_profile(), "history": [],
-        "memory": load_memory(message.from_user.id, message), "turns": 0
+        "memory": load_memory(message.from_user.id, message), "turns": 0, "shown": [], "counted": False
     })
     session["turns"] += 1
     ai = await ai_understand(session, user_text)
@@ -457,7 +466,10 @@ async def handle_turn(bot, message, user_text):
             return
 
     rows = score_candidates(session["profile"], session["memory"])
-    recs = make_recommendations(rows)
+    recs = make_recommendations(rows, exclude_names=session.get("shown", []))
+    if not recs:
+        session["shown"] = []
+        recs = make_recommendations(rows)
     if not recs:
         await message.answer(
             "В текущем ассортименте нет варианта, который одновременно подходит "
@@ -466,7 +478,10 @@ async def handle_turn(bot, message, user_text):
         )
         return
 
-    update_memory(session["memory"], ai or {}, session["profile"], recs)
+    if not session.get("counted"):
+        update_memory(session["memory"], ai or {}, session["profile"], recs)
+        session["counted"] = True
+    session["shown"] = merge_unique(session.get("shown"), [r["Бренд"] + " — " + r["Название"] for r in recs])
     session["history"] += [
         {"role": "user", "text": user_text},
         {"role": "assistant", "text": "recommendations"}
@@ -484,7 +499,7 @@ async def main():
     async def start(message: Message):
         sessions[message.from_user.id] = {
             "profile": empty_profile(), "history": [],
-            "memory": load_memory(message.from_user.id, message), "turns": 0
+            "memory": load_memory(message.from_user.id, message), "turns": 0, "shown": [], "counted": False
         }
         name = html.escape(message.from_user.first_name or "гость")
         await message.answer(
@@ -515,7 +530,7 @@ async def main():
         save_memory(memory)
         sessions[call.from_user.id] = {
             "profile": empty_profile(), "history": [],
-            "memory": memory, "turns": 0
+            "memory": memory, "turns": 0, "shown": [], "counted": False
         }
         await call.answer("Память сброшена")
         await call.message.answer("Готово. Начинаем с чистого листа.", reply_markup=keyboard())
@@ -529,7 +544,11 @@ async def main():
                 "memory": load_memory(call.from_user.id, call.message), "turns": 0
             }
         rows = score_candidates(session["profile"], session["memory"])
-        recs = make_recommendations(rows)
+        recs = make_recommendations(rows, exclude_names=session.get("shown", []))
+        if not recs:
+            session["shown"] = []
+            recs = make_recommendations(rows)
+        session["shown"] = merge_unique(session.get("shown"), [r["Бренд"] + " — " + r["Название"] for r in recs])
         await call.answer()
         if recs:
             await call.message.answer(build_result(session["profile"], recs, session["memory"]),
