@@ -437,59 +437,80 @@ def resolve_pairing_for_rows(rows):
             return pairing, resolved
     return None
 
+def ratio_numbers(ratios):
+    out=[]
+    for ratio in ratios:
+        m=re.search(r"(\d+(?:[.,]\d+)?)", str(ratio))
+        out.append(float(m.group(1).replace(",", ".")) if m else 0.0)
+    total=sum(out)
+    return [(x/total*100 if total else 0) for x in out]
+
+def bowl_technique(rows):
+    max_level=max([row_strength_level(r) or 5 for r in rows] or [5])
+    if max_level >= 8:
+        bowl="Phunnel, 18–22 г; полуплотная/плотная забивка под конкретный табак."
+    else:
+        bowl="Phunnel, 15–20 г; рыхлая/полуплотная забивка."
+    return f"<b>🥣 Чаша:</b> {bowl} Отступ до фольги/HMD — около 2–3 мм."
+
 def detailed_pairing_text(profile, rows):
-    result = resolve_pairing_for_rows(rows)
+    result=resolve_pairing_for_rows(rows)
     if not result:
-        if len(rows) == 1:
-            row = rows[0]
-            lvl = row_strength_level(row) or 5
+        if len(rows)==1:
+            row=rows[0]
+            lvl=row_strength_level(row) or 5
             return (
                 "<b>🧾 Подробный состав</b>\\n\\n"
                 f"<b>{html.escape(row['Бренд'])} — {html.escape(row['Название'])}</b>\\n"
                 "100% одного вкуса.\\n\\n"
-                f"<b>Расчётная крепость:</b> {strength_label(lvl)}.\\n"
-                "<b>Чаша:</b> влажный/сочный табак — phunnel; более сухой классический — традиционная многодырочная.\\n"
-                "<b>Забивка:</b> рыхлая для лёгкого/среднего табака, без сильного прижима; верх ровно под край, без контакта с фольгой/HMD.\\n\\n"
-                "<i>Точный рецепт микса для этой позиции не выдумываю без подтверждённой пропорции.</i>"
+                f"<b>Крепость:</b> {strength_label(lvl)}.\\n"
+                f"{bowl_technique([row])}\\n"
+                "<b>👐 Забивка:</b> разрыхлить, распределить равномерно, не утрамбовывать без необходимости.\\n"
+                "<b>🔥 Жар:</b> старт умеренный; горчит — уменьшить жар, вкус плоский — постепенно добавить.\\n\\n"
+                "<i>Подтверждённой рецептуры микса нет — пропорции не выдумываю.</i>"
             )
-        return "<b>🧾 Подробный состав</b>\\n\\nДля этого сочетания нет подтверждённого рецепта с пропорциями в моей базе. Я не буду выдавать выдуманную пропорцию за проверенную."
-    pairing, resolved = result
-    ratios = pairing["ratio"]
-    level = recipe_strength_score(resolved, ratios)
-    lines = [
-        "<b>🧾 Подробный состав</b>", "",
+        return "<b>🧾 Подробный состав</b>\\n\\nДля этого сочетания нет подтверждённого рецепта с пропорциями. Я не буду выдавать авторский расчёт за опубликованный рецепт."
+
+    pairing,resolved=result
+    ratios=pairing["ratio"]
+    percentages=ratio_numbers(ratios)
+    level=recipe_strength_score(resolved,ratios)
+    lines=[
+        "<b>🧾 Подробный состав</b>","",
         f"<b>{html.escape(pairing['name'])}</b>",
-        f"Источник рецепта: {html.escape(pairing['source'])}", ""
+        f"Источник: {html.escape(pairing['source'])}","",
+        "<b>📐 Рецепт</b>"
     ]
-    for row, ratio in zip(resolved, ratios):
-        lines.append(f"• <b>{html.escape(ratio)}</b> — {html.escape(row['Бренд'])} — {html.escape(row['Название'])}")
+    for row,pct in zip(resolved,percentages):
+        g15=pct*15/100; g20=pct*20/100; g25=pct*25/100
+        lines.append(
+            f"• <b>{pct:.0f}%</b> — {html.escape(row['Бренд'])} — {html.escape(row['Название'])} "
+            f"({g15:.1f} г / {g20:.1f} г / {g25:.1f} г для чаши 15/20/25 г)"
+        )
     lines += [
-        "", f"<b>Расчётная крепость микса:</b> {strength_label(level)}.",
-        "Это рабочая шкала по крепости компонентов и их долям, а не лабораторное измерение никотина.",
-        "", "<b>🥣 Чаша</b>",
-        "Для сочного современного табака — phunnel, чтобы сок оставался в чаше. Для более сухого классического табака — традиционная многодырочная чаша.",
-        "", "<b>👐 Забивка</b>",
-        "Разрыхлить табак, убрать крупные стебли, смешать компоненты отдельно и равномерно распределить. Не утрамбовывать без необходимости. Верх — под край, без прямого контакта с фольгой/HMD.",
-        "", "<b>🔥 Жар</b>",
-        "Начинать умеренно и повышать жар постепенно. Резкость/гарь — уменьшить жар; плоский вкус и слабый пар — немного добавить жар.",
-        "", "<b>🪶 Как сделать легче</b>"
+        "",
+        f"<b>💪 Крепость микса:</b> {level}/10 — {strength_label(level).split('—',1)[-1].strip()}.",
+        "Это расчётная шкала по компонентам и долям, а не лабораторное измерение никотина.",
+        "",
+        bowl_technique(resolved),
+        "<b>👐 Забивка:</b> разрыхлить каждый компонент, смешать и равномерно распределить; отверстия не закрывать.",
+        "<b>🔥 Старт:</b> умеренный жар. Резкость/гарь — убавить; плоский вкус — постепенно добавить.",
+        "",
+        "<b>🪶 Сделать легче:</b> уменьшить долю самого крепкого компонента и заменить её близким по вкусовой роли. Для 1–3/10 не пытаться решить вопрос только жаром.",
+        "",
+        "<b>💪 Сделать крепче:</b> постепенно увеличить долю крепкого компонента или заменить часть мягкой основы. Для 8–10/10 учитывать реальную крепость табака.",
+        "",
+        "<b>🔁 Если компонента нет:</b>"
     ]
     for row in resolved:
-        sub = find_substitute(row, 3)
-        if sub:
-            lines.append(f"• Вместо {html.escape(row['Название'])}: {html.escape(sub['Бренд'])} — {html.escape(sub['Название'])}.")
-    lines += ["", "<b>💪 Как сделать крепче</b>"]
-    for row in resolved:
-        sub = find_substitute(row, 8)
-        if sub:
-            lines.append(f"• Вместо {html.escape(row['Название'])}: {html.escape(sub['Бренд'])} — {html.escape(sub['Название'])}.")
-    lines += ["", "<b>🔁 Если компонента нет</b>"]
-    for row in resolved:
-        sub = find_substitute(row)
+        sub=find_substitute(row)
         if sub:
             lines.append(f"• {html.escape(row['Название'])} → {html.escape(sub['Бренд'])} — {html.escape(sub['Название'])}.")
-    lines += ["", "<b>Важно:</b> фактическое никотиновое воздействие зависит от конкретного табака, температуры, длительности и человека; 1–10 здесь — практическая шкала подбора."]
-    return "\n".join(lines)
+    lines += [
+        "",
+        "<b>Важно:</b> ощущение крепости зависит также от бренда, листа, температуры, чаши и длительности сессии."
+    ]
+    return "\\n".join(lines)
 
 def favorite_mix_from_rows(rows, source=""):
     return {
