@@ -29,6 +29,7 @@ jobs:
         with:
           path: ~/.cache/huggingface/hub
           key: whisper-base-${{ runner.os }}
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 
@@ -36,17 +37,19 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets['OPENROUTER_API_KEY'] }}
-          SUPABASE_URL: ${{ secrets['SUPABASE_URL'] }}
+          SUPABASE_URL: ${{ secrets['SUPABASE_URL'] || 'https://qajbhqrqjhhlxvodnovn.supabase.co' }}
           SUPABASE_KEY: ${{ secrets['SUPABASE_KEY'] }}
           OPENROUTER_MODEL: openrouter/free
           GEMINI_MODEL: gemini-3.6-flash
         run: |
           test -n "$BOT_TOKEN" || { echo "BOT_TOKEN secret is not configured"; exit 1; }
-          test -n "$SUPABASE_URL" || { echo "SUPABASE_URL secret is not configured"; exit 1; }
-          test -n "$SUPABASE_KEY" || { echo "SUPABASE_KEY secret is not configured"; exit 1; }
           echo "Checking Telegram credentials..."
           curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/getMe" | grep -q '"ok":true' || { echo "Telegram BOT_TOKEN check failed"; exit 1; }
-          echo "Checking Supabase..."
-          curl -fsS -H "apikey: ${SUPABASE_KEY}" -H "Authorization: Bearer ${SUPABASE_KEY}" "${SUPABASE_URL}/rest/v1/guest_memory?select=user_id&limit=1" >/dev/null || { echo "Supabase check failed"; exit 1; }
+          if [ -n "$SUPABASE_KEY" ]; then
+            echo "Checking Supabase..."
+            curl -fsS -H "apikey: ${SUPABASE_KEY}" -H "Authorization: Bearer ${SUPABASE_KEY}" "${SUPABASE_URL}/rest/v1/guest_memory?select=user_id&limit=1" >/dev/null || { echo "Supabase check failed"; exit 1; }
+          else
+            echo "Supabase key not configured; running with local session memory."
+          fi
           python -m py_compile bot.py
           python bot.py
