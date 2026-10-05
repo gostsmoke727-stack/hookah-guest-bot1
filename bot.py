@@ -419,6 +419,8 @@ def build_result(profile, rows, memory, pairing_text=""):
     if blocked:
         lines.append("🚫 <b>Не использую:</b> " +
                      ", ".join(html.escape(x) for x in blocked))
+    if pairing_text:
+        lines += ["", pairing_text]
     return "\n".join(lines)
 
 def local_profile_from_text(text):
@@ -557,9 +559,7 @@ async def handle_turn(bot, message, user_text):
     pairing_text = build_pairing_text(session["profile"], ASSORTMENT)
     result_text = build_result(session["profile"], recs, session["memory"], pairing_text)
     if reply:
-        result_text = html.escape(reply) + "
-
-" + result_text
+        result_text = html.escape(reply) + "\n\n" + result_text
     await message.answer(result_text,
                          reply_markup=keyboard())
 
@@ -615,7 +615,8 @@ async def main():
         if not session:
             session = {
                 "profile": empty_profile(), "history": [],
-                "memory": load_memory(call.from_user.id, call.message), "turns": 0
+                "memory": load_memory(call.from_user.id, call.message),
+                "turns": 0, "shown": [], "counted": False
             }
         rows = score_candidates(session["profile"], session["memory"])
         recs = make_recommendations(rows, exclude_names=session.get("shown", []))
