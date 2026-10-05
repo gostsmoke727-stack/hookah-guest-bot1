@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import urllib.request
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,8 +21,9 @@ BASE = Path(__file__).resolve().parent
 CSV_PATH = BASE / "data" / "assortment.csv"
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").replace("\ufeff", "").strip().strip("\"").strip("'").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-5.6-sol")
-OPENROUTER_STT_MODEL = os.getenv("OPENROUTER_STT_MODEL", "openai/whisper-large-v3-turbo")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 
@@ -215,43 +217,35 @@ def profile_from_memory(memory):
         "strength_level": memory.get("strength_level"),
     })
 
-def openrouter_request(system_prompt, user_prompt):
-    if not OPENROUTER_API_KEY:
-        return None
-    payload = {
-        "model": OPENROUTER_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 280,
-    }
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + OPENROUTER_API_KEY,
-            "HTTP-Referer": "https://github.com/gostsmoke727-stack/hookah-guest-bot1",
-            "X-Title": "Hookah Guest Bot",
-        },
-        method="POST",
-    )
+def parse_ai_json(text):
+    text=str(text or "").strip()
+    fence=chr(96)*3
+    text=re.sub(r"^"+re.escape(fence)+r"(?:json)?\s*","",text,flags=re.I)
+    text=re.sub(r"\s*"+re.escape(fence)+r"$","",text)
+    try: return json.loads(text)
+    except json.JSONDecodeError:
+        match=re.search(r"\{.*\}",text,flags=re.S)
+        return json.loads(match.group(0)) if match else None
+
+def gemini_text_request(system_prompt,user_prompt):
+    if not GEMINI_API_KEY: return None
+    payload={"system_instruction":{"parts":[{"text":system_prompt}]},"contents":[{"role":"user","parts":[{"text":user_prompt}]}],"generationConfig":{"temperature":0.2,"maxOutputTokens":280}}
+    url="https://generativelanguage.googleapis.com/v1beta/models/"+GEMINI_MODEL+":generateContent?key="+urllib.parse.quote(GEMINI_API_KEY)
+    req=urllib.request.Request(url,data=json.dumps(payload,ensure_ascii=False).encode(),headers={"Content-Type":"application/json"},method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=25) as response:
-            data = json.loads(response.read().decode())
-        text = str(data["choices"][0]["message"]["content"]).strip()
-        fence = chr(96) * 3
-        text = re.sub(r"^" + re.escape(fence) + r"(?:json)?\s*", "", text, flags=re.I)
-        text = re.sub(r"\s*" + re.escape(fence) + r"$", "", text)
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", text, flags=re.S)
-            return json.loads(match.group(0)) if match else None
-    except Exception:
-        return None
+        with urllib.request.urlopen(req,timeout=25) as response: data=json.loads(response.read().decode())
+        parts=data.get("candidates",[{}])[0].get("content",{}).get("parts",[])
+        return parse_ai_json("".join(str(p.get("text","")) for p in parts if p.get("text")))
+    except Exception: return None
+
+def openrouter_request(system_prompt,user_prompt):
+    if not OPENROUTER_API_KEY: return None
+    payload={"model":OPENROUTER_MODEL,"messages":[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],"temperature":0.2,"max_tokens":280}
+    req=urllib.request.Request("https://openrouter.ai/api/v1/chat/completions",data=json.dumps(payload,ensure_ascii=False).encode(),headers={"Content-Type":"application/json","Authorization":"Bearer "+OPENROUTER_API_KEY,"HTTP-Referer":"https://github.com/gostsmoke727-stack/hookah-guest-bot1","X-Title":"Hookah Guest Bot"},method="POST")
+    try:
+        with urllib.request.urlopen(req,timeout=25) as response: data=json.loads(response.read().decode())
+        return parse_ai_json(data["choices"][0]["message"]["content"])
+    except Exception: return None
 
 async def ai_understand(session, user_text):
     prompt = (
@@ -260,7 +254,7 @@ async def ai_understand(session, user_text):
         "\nИСТОРИЯ:\n" + json.dumps(session["history"][-10:], ensure_ascii=False) +
         "\nСООБЩЕНИЕ ГОСТЯ:\n" + user_text
     )
-    return await asyncio.to_thread(openrouter_request, AI_SYSTEM, prompt)
+    return await asyncio.to_thread(gemini_text_request, AI_SYSTEM, prompt) or await asyncio.to_thread(openrouter_request, AI_SYSTEM, prompt)
 
 def canonical_term(term):
     t = norm(term)
@@ -460,23 +454,23 @@ def bowl_kind(profile=None):
         return "классическая"
     return "phunnel"
 
-def bowl_technique(rows, profile=None):
-    max_level = max([row_strength_level(r) or 5 for r in rows] or [5])
-    kind = bowl_kind(profile)
-    if kind == "классическая":
-        return "<b>🥣 Чаша:</b> Классическая египетская, 15–20 г. <b>Забивка:</b> рыхло/полуплотно, отверстия не закрывать. <b>Отступ:</b> около 2–3 мм."
-    capacity = "15–20 г" if max_level < 8 else "18–22 г"
-    return f"<b>🥣 Чаша:</b> Phunnel, {capacity}. <b>Забивка:</b> рыхло для светлого табака; плотнее только если этого требует лист. <b>Отступ:</b> около 2–3 мм."
+def normalized_bowl(profile):
+    t=norm(profile.get("bowl") or "")
+    if any(x in t for x in ("класс","егип","турец","традиц")): return "Классическая"
+    if "vortex" in t or "ворте" in t: return "Vortex"
+    if "phunnel" in t or "фанн" in t: return "Phunnel"
+    return "Phunnel"
 
-async def send_bowl_photo(message, profile, caption=None):
-    kind = bowl_kind(profile)
-    text = caption or ("🥣 <b>Классическая египетская чаша</b>" if kind == "классическая" else "🥣 <b>Phunnel</b>")
-    text += "\n" + BOWL_PHOTO_CREDITS[kind]
-    try:
-        await message.answer_photo(photo=BOWL_PHOTOS[kind], caption=text)
-        return True
-    except Exception:
-        return False
+def bowl_technique(rows,profile=None):
+    max_level=max([row_strength_level(r) or 5 for r in rows] or [5])
+    bowl=normalized_bowl(profile or {})
+    if bowl=="Классическая": pack,grams="рыхлая/полуплотная; не перекрывать отверстия","15–20 г"
+    elif max_level>=8: pack,grams="полуплотная/плотная под конкретный табак","18–22 г"
+    else: pack,grams="рыхлая/полуплотная","15–20 г"
+    return f"<b>🥣 Чаша:</b> {bowl}, {grams}; {pack}. Отступ около 2–3 мм."
+
+def bowl_photo_query(profile):
+    return {"Классическая":"traditional Egyptian hookah bowl shisha","Vortex":"vortex hookah bowl shisha","Phunnel":"phunnel hookah bowl shisha"}.get(normalized_bowl(profile),"phunnel hookah bowl shisha")
 
 def detailed_pairing_text(profile, rows):
     result=resolve_pairing_for_rows(rows)
@@ -517,7 +511,7 @@ def detailed_pairing_text(profile, rows):
         f"<b>💪 Крепость микса:</b> {level}/10 — {strength_label(level).split('—',1)[-1].strip()}.",
         "Это расчётная шкала по компонентам и долям, а не лабораторное измерение никотина.",
         "",
-        bowl_technique(resolved),
+        bowl_technique(resolved, profile),
         "<b>👐 Забивка:</b> разрыхлить каждый компонент, смешать и равномерно распределить; отверстия не закрывать.",
         "<b>🔥 Старт:</b> умеренный жар. Резкость/гарь — убавить; плоский вкус — постепенно добавить.",
         "",
@@ -747,16 +741,14 @@ def menu_keyboard():
         [InlineKeyboardButton(text="🔄 Ещё вариант", callback_data="again"), InlineKeyboardButton(text="🧹 Сбросить", callback_data="forget")]
     ])
 
-def keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔥 Подобрать", callback_data="new"),
-         InlineKeyboardButton(text="📋 Все команды", callback_data="menu")],
-        [InlineKeyboardButton(text="🧾 Подробный состав", callback_data="details"),
-         InlineKeyboardButton(text="💾 Запомнить", callback_data="remember")],
-        [InlineKeyboardButton(text="🔄 Ещё вариант", callback_data="again"),
-         InlineKeyboardButton(text="🧠 Профиль", callback_data="profile")],
-        [InlineKeyboardButton(text="🧹 Сбросить память", callback_data="forget")]
-    ])
+def keyboard(rows=None):
+    buttons=[[InlineKeyboardButton(text="🔥 Подобрать",callback_data="new"),InlineKeyboardButton(text="📋 Все команды",callback_data="menu")]]
+    if rows:
+        for i,_ in enumerate(rows[:3]): buttons.append([InlineKeyboardButton(text=f"🥣 Выбрать №{i+1}",callback_data=f"pick:{i}")])
+        if len(rows)>=2: buttons.append([InlineKeyboardButton(text="🎯 Собрать сочетание",callback_data="mix")])
+    buttons += [[InlineKeyboardButton(text="🧾 Подробный состав",callback_data="details"),InlineKeyboardButton(text="💾 Запомнить",callback_data="remember")],[InlineKeyboardButton(text="🔄 Ещё вариант",callback_data="again"),InlineKeyboardButton(text="🧠 Профиль",callback_data="profile")],[InlineKeyboardButton(text="🧹 Сбросить память",callback_data="forget")]]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 def profile_text(memory):
     return (
         f"<b>🧠 Профиль {html.escape(memory.get('name') or 'гостя')}</b>\n\n"
@@ -767,43 +759,25 @@ def profile_text(memory):
         f"Последнее: {html.escape(', '.join(memory.get('last_hookahs', [])[:3]) or 'пока нет')}"
     )
 
-async def transcribe_voice(bot, message):
-    if not OPENROUTER_API_KEY:
-        return ""
-    tg_file = await bot.get_file(message.voice.file_id)
-    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-        path = tmp.name
+async def transcribe_voice(bot,message):
+    if not GEMINI_API_KEY: return ""
+    tg_file=await bot.get_file(message.voice.file_id)
+    with tempfile.NamedTemporaryFile(suffix=".ogg",delete=False) as tmp: path=tmp.name
     try:
-        await bot.download(tg_file, destination=path)
-        with open(path, "rb") as f:
-            audio_b64 = base64.b64encode(f.read()).decode("ascii")
-        payload = {
-            "model": OPENROUTER_STT_MODEL,
-            "input_audio": {"data": audio_b64, "format": "ogg"},
-            "language": "ru"
-        }
-        req = urllib.request.Request(
-            "https://openrouter.ai/api/v1/audio/transcriptions",
-            data=json.dumps(payload).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + OPENROUTER_API_KEY,
-                "HTTP-Referer": "https://github.com/gostsmoke727-stack/hookah-guest-bot1",
-                "X-Title": "Hookah Guest Bot",
-            },
-            method="POST",
-        )
+        await bot.download(tg_file,destination=path)
+        with open(path,"rb") as f: audio_b64=base64.b64encode(f.read()).decode("ascii")
+        payload={"contents":[{"role":"user","parts":[{"text":"Точно расшифруй русскую речь. Сохрани названия вкусов, брендов и разговорные слова. Верни только текст."},{"inline_data":{"mime_type":"audio/ogg","data":audio_b64}}]}],"generationConfig":{"temperature":0,"maxOutputTokens":512}}
+        url="https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key="+urllib.parse.quote(GEMINI_API_KEY)
+        req=urllib.request.Request(url,data=json.dumps(payload).encode(),headers={"Content-Type":"application/json"},method="POST")
         def request_stt():
-            with urllib.request.urlopen(req, timeout=55) as response:
-                return str(json.loads(response.read().decode()).get("text") or "").strip()
+            with urllib.request.urlopen(req,timeout=35) as response: data=json.loads(response.read().decode())
+            parts=data.get("candidates",[{}])[0].get("content",{}).get("parts",[])
+            return "".join(str(p.get("text","")) for p in parts if p.get("text")).strip()
         return await asyncio.to_thread(request_stt)
-    except Exception:
-        return ""
+    except Exception: return ""
     finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+        try: os.remove(path)
+        except OSError: pass
 
 
 async def handle_turn(bot, message, user_text):
@@ -896,14 +870,14 @@ async def handle_turn(bot, message, user_text):
         x in norm(user_text)
         for x in ("микс", "сочетание", "рецепт", "пропорци")
     )
-    pairing = find_curated_pairing(prefs, ASSORTMENT) if wants_mix else None
+    pairing = find_curated_pairing(prefs, recs) if wants_mix else None
     session["last_mix_rows"] = pairing[1] if pairing else recs
-    pairing_text = build_pairing_text(prefs, ASSORTMENT) if wants_mix else ""
+    pairing_text = build_pairing_text(prefs, recs) if wants_mix else ""
     result_text = build_result(prefs, recs, session["memory"], pairing_text)
     if reply:
         result_text = html.escape(reply[:600]) + "\n\n" + result_text
 
-    await message.answer(result_text, reply_markup=keyboard())
+    await message.answer(result_text, reply_markup=keyboard(recs))
 
 
 async def show_menu(message):
@@ -957,6 +931,25 @@ async def show_favorites(message):
         lines.append(f"<b>{i}.</b> {html.escape(mix.get('name',''))}")
     await message.answer("\n".join(lines), reply_markup=keyboard())
 
+async def find_bowl_photo(profile):
+    query=bowl_photo_query(profile)
+    url="https://commons.wikimedia.org/w/api.php?"+urllib.parse.urlencode({"action":"query","generator":"search","gsrsearch":query,"gsrnamespace":6,"gsrlimit":5,"prop":"imageinfo","iiprop":"url","iiurlwidth":900,"format":"json","origin":"*"})
+    def fetch():
+        req=urllib.request.Request(url,headers={"User-Agent":"HookahGuestBot/1.0"})
+        with urllib.request.urlopen(req,timeout=8) as response: data=json.loads(response.read().decode())
+        for page in list((data.get("query",{}).get("pages") or {}).values()):
+            info=page.get("imageinfo") or []
+            if info: return info[0].get("thumburl") or info[0].get("url")
+        return None
+    try: return await asyncio.to_thread(fetch)
+    except Exception: return None
+
+async def send_bowl_photo(bot,message,profile):
+    photo_url=await find_bowl_photo(profile)
+    if photo_url:
+        try: await bot.send_photo(message.chat.id,photo_url,caption=f"🥣 {normalized_bowl(profile)} — пример чаши")
+        except Exception: pass
+
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
@@ -1008,6 +1001,35 @@ async def main():
         }
         await call.answer()
         await call.message.answer("Окей. Что хочется сегодня? Можно голосом.", reply_markup=menu_keyboard())
+
+    @dp.callback_query(F.data.startswith("pick:"))
+    async def pick_callback(call: CallbackQuery):
+        session=sessions.get(call.from_user.id)
+        if not session or not session.get("last_recs"):
+            await call.answer("Сначала сделай подбор",show_alert=True); return
+        try: index=int(call.data.split(":",1)[1])
+        except (ValueError,IndexError):
+            await call.answer("Не понял выбор",show_alert=True); return
+        rows=session["last_recs"]
+        if index<0 or index>=len(rows):
+            await call.answer("Такого варианта нет",show_alert=True); return
+        selected=[rows[index]]
+        session["last_mix_rows"]=selected
+        await call.answer("Выбрано 👍")
+        await send_bowl_photo(call.bot,call.message,session["profile"])
+        await call.message.answer(detailed_pairing_text(session["profile"],selected),reply_markup=keyboard(selected))
+
+    @dp.callback_query(F.data == "mix")
+    async def mix_callback(call: CallbackQuery):
+        session=sessions.get(call.from_user.id)
+        if not session or not session.get("last_recs"):
+            await call.answer("Сначала сделай подбор",show_alert=True); return
+        rows=session["last_recs"]
+        pairing=find_curated_pairing(session["profile"],rows)
+        session["last_mix_rows"]=pairing[1] if pairing else rows[:3]
+        await call.answer("Сочетание готово 👍")
+        await send_bowl_photo(call.bot,call.message,session["profile"])
+        await call.message.answer(detailed_pairing_text(session["profile"],session["last_mix_rows"]),reply_markup=keyboard(session["last_mix_rows"]))
 
     @dp.callback_query(F.data == "profile")
     async def profile_callback(call: CallbackQuery):
@@ -1103,7 +1125,7 @@ async def main():
             await call.answer()
             await call.message.answer(
                 build_result(session["profile"], recs, session["memory"]),
-                reply_markup=menu_keyboard(),
+                reply_markup=keyboard(recs),
             )
         else:
             await call.answer("Нужны ещё пожелания", show_alert=True)
