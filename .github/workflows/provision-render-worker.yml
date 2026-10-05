@@ -2,8 +2,7 @@ name: Provision Render Worker
 
 on:
   push:
-    paths:
-      - ".github/workflows/provision-render-worker.yml"
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -13,25 +12,51 @@ jobs:
       - name: Install Render CLI
         run: |
           curl -fsSL https://raw.githubusercontent.com/render-oss/cli/refs/heads/main/bin/install.sh | sh
-          echo "$HOME/.render/bin" >> "$GITHUB_PATH"
 
-      - name: Authenticate and provision worker
+      - name: Create Render background worker
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           set -euo pipefail
           render workspace set tea-db15t6ugekts73cbrjhg
+
           if render services --output json | grep -q '"name":"hookah-guest-bot1-worker"'; then
             echo "Worker already exists."
             exit 0
           fi
-          render services create             --from srv-db16kp9srm7s73ab26m0             --name hookah-guest-bot1-worker             --type background_worker             --repo https://github.com/gostsmoke727-stack/hookah-guest-bot1.git             --branch main             --runtime python             --build-command "pip install -r requirements.txt"             --start-command "python bot.py"             --plan starter             --region frankfurt             --auto-deploy             --output json
 
-      - name: Verify worker exists
+          args=(
+            --name hookah-guest-bot1-worker
+            --type background_worker
+            --repo https://github.com/gostsmoke727-stack/hookah-guest-bot1.git
+            --branch main
+            --runtime python
+            --build-command "pip install -r requirements.txt"
+            --start-command "python bot.py"
+            --plan starter
+            --region frankfurt
+            --auto-deploy
+            --output json
+          )
+
+          [ -n "${BOT_TOKEN:-}" ] && args+=(--env-var "BOT_TOKEN=$BOT_TOKEN")
+          [ -n "${OPENROUTER_API_KEY:-}" ] && args+=(--env-var "OPENROUTER_API_KEY=$OPENROUTER_API_KEY")
+          [ -n "${SUPABASE_URL:-}" ] && args+=(--env-var "SUPABASE_URL=$SUPABASE_URL")
+          [ -n "${SUPABASE_KEY:-}" ] && args+=(--env-var "SUPABASE_KEY=$SUPABASE_KEY")
+          args+=(--env-var "OPENROUTER_MODEL=openrouter/free")
+          args+=(--env-var "WHISPER_MODEL=tiny")
+
+          render services create "${args[@]}"
+
+      - name: Verify Render worker
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
           set -euo pipefail
           render workspace set tea-db15t6ugekts73cbrjhg
           render services --output json | grep -q '"name":"hookah-guest-bot1-worker"'
-          echo "Render worker provisioned."
+          echo "Render worker exists."
