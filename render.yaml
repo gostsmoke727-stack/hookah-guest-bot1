@@ -11,6 +11,10 @@ services:
         sync: false
       - key: OPENROUTER_MODEL
         value: openrouter/free
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3-flash-preview
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_KEY
