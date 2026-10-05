@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import csv
 import html
 import json
@@ -19,16 +20,15 @@ BASE = Path(__file__).resolve().parent
 CSV_PATH = BASE / "data" / "assortment.csv"
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").replace("\ufeff", "").strip().strip("\"").strip("'").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-5.6-sol")
+OPENROUTER_STT_MODEL = os.getenv("OPENROUTER_STT_MODEL", "openai/whisper-large-v3-turbo")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "tiny")
 
 with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
     ASSORTMENT = [r for r in csv.DictReader(f) if r.get("Бренд") and r.get("Название")]
 
 sessions = {}
-_whisper_model = None
 
 CURATED_PAIRINGS = [
     {"name":"Raspberry + Pinkman + Grapefruit","terms":["малина","pinkman","грейпфрут"],"ratio":["30%","30%","40%"],"source":"Hookah House"},
@@ -43,33 +43,24 @@ CURATED_PAIRINGS = [
 ]
 
 AI_SYSTEM = """
-Ты — AI-мастер кальяна премиального заведения.
-Не проводи анкету. Веди короткий естественный диалог и запоминай гостя.
+Ты — AI-мастер кальяна премиального заведения. Веди живой разговор, а не анкету.
 
-КРИТИЧЕСКИЕ ПРАВИЛА:
-1. "ХОЧУ" и "НЕ ХОЧУ" — разные сущности.
-2. Любой явный запрет, аллергия или "не люблю" — абсолютный запрет.
-3. Не выдумывай вкусы, бренды и наличие. Позиции выбирает отдельный движок.
-4. Не задавай лишних вопросов, если данных достаточно.
-5. Максимум один короткий вопрос за ход.
-6. Учитывай всю историю и сохранённую память.
-7. Отвечай по-русски живо, коротко, без анкет и канцелярита.
-8. Если данных достаточно, в reply коротко отреагируй на гостя, но не придумывай факты о составе/наличии.
-9. Не перегружай гостя: максимум одна короткая мысль и один вопрос за ход.
-
-Понимай:
-"не приторное" -> снижай сладость;
-"свежее" -> свежесть/мята/холод;
-"без мяты", "не люблю холодок" -> абсолютный запрет;
-"ягоды с тропиками" -> две положительные оси;
-"на классике" -> классическая чаша;
-"покрепче/полегче" -> крепость;
-"как в прошлый раз" -> память;
-"удиви меня" -> один знакомый и один экспериментальный вариант.
+Правила:
+- Явное "не хочу", "не люблю", "без", аллергия = абсолютный запрет.
+- Не возвращай запрещённое в desired_terms.
+- Не выдумывай наличие, бренды, вкусы или рецепты: каталог проверяется кодом.
+- Новое явное пожелание важнее старого.
+- "воздух", "детский", "максимально лёгкий" = 1/10.
+- "лёгкий" = 2–3/10; "средний" = 4–6/10; "крепкий" = 7–9/10; "очень крепкий", "убойный" = 10/10.
+- Если названо число 1–10, сохрани его в strength_level.
+- "классика" = классическая чаша.
+- "ягоды с тропиками" = две положительные оси одновременно.
+- Рецепт показывай только при прямом запросе на микс/сочетание/рецепт/пропорции.
+- Отвечай естественно, 1–3 предложения. Не задавай вопрос, если данных достаточно.
 
 Верни ТОЛЬКО JSON:
 {
- "reply": "короткая фраза",
+ "reply": "естественная реплика гостю",
  "name": "",
  "desired_terms": [],
  "desired_categories": [],
@@ -77,6 +68,7 @@ AI_SYSTEM = """
  "allergies": [],
  "bowl": null,
  "strength": null,
+ "strength_level": null,
  "sweetness": null,
  "freshness": null,
  "frequency": null,
@@ -97,7 +89,7 @@ def now_iso():
 def empty_profile():
     return {
         "desired_terms": [], "desired_categories": [], "excluded_terms": [],
-        "allergies": [], "bowl": None, "strength": None,
+        "allergies": [], "bowl": None, "strength": None, "strength_level": None,
         "sweetness": None, "freshness": None, "frequency": None, "mood": None
     }
 
@@ -136,9 +128,9 @@ def merge_profile(old, data):
         p[key] = merge_unique(p.get(key), data.get(key))
     blocked = {norm(x) for x in p["excluded_terms"] + p["allergies"]}
     p["desired_terms"] = [x for x in p["desired_terms"] if norm(x) not in blocked]
-    for key in ("bowl", "strength", "sweetness", "freshness", "frequency", "mood"):
+    for key in ("bowl", "strength", "strength_level", "sweetness", "freshness", "frequency", "mood"):
         value = data.get(key)
-        if value and norm(value) not in {"null", "none"}:
+        if value is not None and norm(value) not in {"null", "none"}:
             p[key] = value
     return p
 
@@ -188,12 +180,13 @@ def update_memory(memory, data, profile, recommendations=None, increment_visit=F
     memory["allergies"] = merge_unique(memory.get("allergies"), profile["allergies"])
     if profile.get("strength"):
         memory["usual_strength"] = profile["strength"]
+    if profile.get("strength_level") is not None:
+        memory["strength_level"] = int(profile["strength_level"])
     if profile.get("bowl"):
         memory["usual_bowl"] = profile["bowl"]
     if recommendations:
-        memory["last_hookahs"] = [
-            r["Бренд"] + " — " + r["Название"] for r in recommendations[:3]
-        ]
+        recent = [r["Бренд"] + " — " + r["Название"] for r in recommendations[:3]]
+        memory["last_hookahs"] = merge_unique(recent, memory.get("last_hookahs", []))[:12]
     memory["favorite_flavors"] = merge_unique(
         memory.get("favorite_flavors"), profile["desired_terms"]
     )
@@ -209,6 +202,7 @@ def profile_from_memory(memory):
         "excluded_terms": memory.get("dislikes", []),
         "allergies": memory.get("allergies", []),
         "bowl": memory.get("usual_bowl"), "strength": memory.get("usual_strength"),
+        "strength_level": memory.get("strength_level"),
     })
 
 def openrouter_request(system_prompt, user_prompt):
@@ -294,6 +288,33 @@ def term_matches(row, term):
     needles = aliases.get(t, [t])
     return any(any(n in field for n in needles) for field in fields)
 
+def strength_to_level(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return max(1, min(10, int(value)))
+    t = norm(value)
+    m = re.search(r"(?<!\d)(10|[1-9])(?!\d)", t)
+    if m:
+        return int(m.group(1))
+    if any(x in t for x in ("воздух", "детский", "максимально лег")):
+        return 1
+    if "очень креп" in t or "убойн" in t or "максимально креп" in t:
+        return 10
+    if "креп" in t:
+        return 8
+    if "сред" in t:
+        return 5
+    if "лег" in t or "мяг" in t:
+        return 3
+    return None
+
+def row_strength_level(row):
+    return strength_to_level(row.get("Крепость", ""))
+
+def recent_names(memory):
+    return {norm(x) for x in (memory.get("last_hookahs") or [])}
+
 def score_candidates(profile, memory):
     desired_terms = profile["desired_terms"]
     desired_categories = profile["desired_categories"]
@@ -322,15 +343,12 @@ def score_candidates(profile, memory):
         for wanted in soft_likes:
             if term_matches(row, wanted):
                 score += 2
-        if strength:
-            if strength in row_strength:
-                score += 6
-            elif strength.startswith("лег") and "лег" in row_strength:
-                score += 5
-            elif strength.startswith("сред") and "сред" in row_strength:
-                score += 5
-            elif strength.startswith("креп") and "креп" in row_strength:
-                score += 5
+        target_level = profile.get("strength_level") or strength_to_level(strength)
+        if target_level:
+            delta = abs(row_strength_level(row) - int(target_level))
+            score += 10 if delta == 0 else 7 if delta == 1 else 4 if delta == 2 else 1 if delta <= 3 else -4
+        if norm(row["Бренд"] + " — " + row["Название"]) in recent_names(memory):
+            score -= 18
 
         sweetness = norm(profile.get("sweetness"))
         if "не" in sweetness and "слад" in sweetness and "слад" in category:
@@ -389,79 +407,95 @@ def build_pairing_text(profile, rows):
             f"\n<i>Основа: опубликованный микс {html.escape(pairing['source'])}; "
             "показываю его только когда все компоненты найдены в текущем ассортименте.</i>")
 
-def make_recommendations(rows, limit=3, exclude_names=None):
+def make_recommendations(rows, limit=3, exclude_names=None, diversity_offset=0):
     exclude_names = {norm(x) for x in (exclude_names or [])}
+    pool = [r for r in rows if norm(r["Бренд"] + " — " + r["Название"]) not in exclude_names]
+    if not pool:
+        return []
+    start = diversity_offset % len(pool)
+    rotated = pool[start:] + pool[:start]
     selected, brands = [], set()
-    for row in rows:
-        if norm(row["Бренд"] + " — " + row["Название"]) in exclude_names:
-            continue
+    for row in rotated:
         if row["Бренд"] not in brands:
             selected.append(row)
             brands.add(row["Бренд"])
         if len(selected) >= limit:
             break
     if len(selected) < limit:
-        for row in rows:
-            if norm(row["Бренд"] + " — " + row["Название"]) in exclude_names:
-                continue
+        for row in rotated:
             if row not in selected:
                 selected.append(row)
             if len(selected) >= limit:
                 break
     return selected[:limit]
 
+
 def card(row, index):
-    return (f"<b>{index}. {html.escape(row['Бренд'])}</b> — "
-            f"{html.escape(row['Название'])}\n"
-            f"<i>{html.escape(row.get('Категория',''))} · "
-            f"{html.escape(row.get('Крепость',''))}</i>")
+    return (
+        f"<b>{index}. {html.escape(row['Бренд'])} — {html.escape(row['Название'])}</b>\n"
+        f"Категория: {html.escape(row.get('Категория',''))}\n"
+        f"Направление: {html.escape(row.get('Направление',''))}\n"
+        f"Крепость табака: {html.escape(row.get('Крепость',''))}"
+    )
+
+def strength_label(level):
+    level = strength_to_level(level)
+    if level is None:
+        return "не задана"
+    if level == 1:
+        return "1/10 — воздух / детский"
+    if level == 2:
+        return "2/10 — очень лёгкая"
+    if level == 3:
+        return "3/10 — лёгкая"
+    if level <= 6:
+        return f"{level}/10 — средняя"
+    if level <= 9:
+        return f"{level}/10 — крепкая"
+    return "10/10 — очень крепкая"
 
 def build_result(profile, rows, memory, pairing_text=""):
     bowl = profile.get("bowl") or memory.get("usual_bowl") or "Классическая чаша"
-    strength = profile.get("strength") or memory.get("usual_strength") or "Средняя"
-    lines = ["<b>Вот что я бы сделал сегодня:</b>", ""]
+    level = profile.get("strength_level") or memory.get("strength_level")
+    strength = strength_label(level or profile.get("strength") or memory.get("usual_strength") or 5)
+    lines = ["<b>🔥 Подбор на сегодня</b>", ""]
     for i, row in enumerate(rows, 1):
         lines += [card(row, i), ""]
     lines += [
-        f"🔥 <b>Чаша:</b> {html.escape(str(bowl))}",
-        f"💪 <b>Крепость:</b> {html.escape(str(strength))}",
+        "<b>Параметры</b>",
+        f"🥣 Чаша: {html.escape(str(bowl))}",
+        f"💪 Крепость: {html.escape(str(strength))}"
     ]
     blocked = merge_unique(profile["excluded_terms"], profile["allergies"])
     if blocked:
-        lines.append("🚫 <b>Не использую:</b> " +
-                     ", ".join(html.escape(x) for x in blocked))
+        lines += ["", "<b>🚫 Исключаю</b>", html.escape(", ".join(blocked))]
     if pairing_text:
         lines += ["", pairing_text]
     return "\n".join(lines)
 
+
 def local_profile_from_text(text):
     t = norm(text)
     p = empty_profile()
-    p["desired_terms"] = [
-        x for x in ["ягоды", "тропики", "сладкое", "кислое", "свежее", "цитрус"]
-        if x in t
-    ]
-    for match in re.finditer(
-        r"(?:не хочу|не люблю|без|не надо|аллергия на)\s+([^.!?\n]+)", t
-    ):
+    p["desired_terms"] = [x for x in ["ягоды", "тропики", "сладкое", "кислое", "свежее", "цитрус"] if x in t]
+    for match in re.finditer(r"(?:не хочу|не люблю|без|не надо|аллергия на)\s+([^.!?\n]+)", t):
         for token in re.split(r"[,;]+|\s+и\s+", match.group(1)):
             token = token.strip()
             if len(token) > 2 and token not in {"табак","вкус","вкусы","кальян"}:
                 p["excluded_terms"].append(canonical_term(token))
     if "класс" in t:
         p["bowl"] = "Классическая чаша"
-    if "покреп" in t or "крепк" in t:
-        p["strength"] = "Крепкие"
-    elif "легк" in t or "мягк" in t:
-        p["strength"] = "Легкие"
-    elif "сред" in t:
-        p["strength"] = "Средние"
+    level = strength_to_level(t)
+    if level is not None:
+        p["strength_level"] = level
+        p["strength"] = "Легкие" if level <= 3 else ("Средние" if level <= 6 else "Крепкие")
     if "не притор" in t or "не слишком слад" in t:
         p["sweetness"] = "не слишком сладкое"
     if "без мяты" in t or "не люблю мят" in t or "без холод" in t:
         p["freshness"] = "без свежести/холода"
         p["excluded_terms"].append("мята")
     return p
+
 
 def keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -482,32 +516,43 @@ def profile_text(memory):
     )
 
 async def transcribe_voice(bot, message):
-    global _whisper_model
+    if not OPENROUTER_API_KEY:
+        return ""
     tg_file = await bot.get_file(message.voice.file_id)
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
         path = tmp.name
     try:
         await bot.download(tg_file, destination=path)
-        if _whisper_model is None:
-            from faster_whisper import WhisperModel
-            _whisper_model = await asyncio.to_thread(
-                WhisperModel, WHISPER_MODEL, device="cpu", compute_type="int8"
-            )
-        segments, _ = await asyncio.to_thread(
-            _whisper_model.transcribe,
-            path,
-            language="ru",
-            vad_filter=True,
-            beam_size=1,
-            condition_on_previous_text=False,
-            without_timestamps=True
+        with open(path, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode("ascii")
+        payload = {
+            "model": OPENROUTER_STT_MODEL,
+            "input_audio": {"data": audio_b64, "format": "ogg"},
+            "language": "ru"
+        }
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/audio/transcriptions",
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + OPENROUTER_API_KEY,
+                "HTTP-Referer": "https://github.com/gostsmoke727-stack/hookah-guest-bot1",
+                "X-Title": "Hookah Guest Bot",
+            },
+            method="POST",
         )
-        return " ".join(s.text.strip() for s in segments).strip()
+        def request_stt():
+            with urllib.request.urlopen(req, timeout=55) as response:
+                return str(json.loads(response.read().decode()).get("text") or "").strip()
+        return await asyncio.to_thread(request_stt)
+    except Exception:
+        return ""
     finally:
         try:
             os.remove(path)
         except OSError:
             pass
+
 
 async def handle_turn(bot, message, user_text):
     session = sessions.setdefault(message.from_user.id, {
@@ -537,7 +582,7 @@ async def handle_turn(bot, message, user_text):
     blocked = prefs["excluded_terms"] + prefs["allergies"]
     has_positive = bool(
         prefs["desired_terms"] or prefs["desired_categories"] or
-        prefs.get("strength") or prefs.get("bowl")
+        prefs.get("strength") or prefs.get("strength_level") or prefs.get("bowl")
     )
 
     # Сообщение только о запрете/нежелании: фиксируем и продолжаем короткий диалог.
@@ -562,10 +607,11 @@ async def handle_turn(bot, message, user_text):
         return
 
     rows = score_candidates(prefs, session["memory"])
-    recs = make_recommendations(rows, exclude_names=session.get("shown", []))
+    recs = make_recommendations(rows, exclude_names=session.get("shown", []) + list(recent_names(session["memory"])), diversity_offset=session["turns"] * 3)
     if not recs:
-        session["shown"] = []
-        recs = make_recommendations(rows)
+        recs = make_recommendations(rows, exclude_names=session.get("shown", []), diversity_offset=session["turns"] * 3)
+    if not recs:
+        recs = make_recommendations(rows, diversity_offset=session["turns"] * 3)
 
     if not recs:
         await message.answer(
@@ -599,7 +645,7 @@ async def handle_turn(bot, message, user_text):
     pairing_text = build_pairing_text(prefs, ASSORTMENT) if wants_mix else ""
     result_text = build_result(prefs, recs, session["memory"], pairing_text)
     if reply:
-        result_text = html.escape(reply[:220]) + "\n\n" + result_text
+        result_text = html.escape(reply[:600]) + "\n\n" + result_text
 
     await message.answer(result_text, reply_markup=keyboard())
 
@@ -667,15 +713,15 @@ async def main():
                 "turns": 0, "shown": [], "counted": False
             }
         rows = score_candidates(session["profile"], session["memory"])
-        recs = make_recommendations(rows, exclude_names=session.get("shown", []))
+        recs = make_recommendations(rows, exclude_names=session.get("shown", []) + list(recent_names(session["memory"])), diversity_offset=session["turns"] * 3 + 1)
         if not recs:
-            session["shown"] = []
-            recs = make_recommendations(rows)
+            recs = make_recommendations(rows, exclude_names=session.get("shown", []), diversity_offset=session["turns"] * 3 + 1)
+        if not recs:
+            recs = make_recommendations(rows, diversity_offset=session["turns"] * 3 + 1)
         session["shown"] = merge_unique(session.get("shown"), [r["Бренд"] + " — " + r["Название"] for r in recs])
         await call.answer()
         if recs:
-            pairing_text = build_pairing_text(session["profile"], ASSORTMENT)
-            await call.message.answer(build_result(session["profile"], recs, session["memory"], pairing_text),
+            await call.message.answer(build_result(session["profile"], recs, session["memory"]),
                                       reply_markup=keyboard())
         else:
             await call.message.answer("Дай ещё одно пожелание — и я докручу подбор.",
