@@ -31,6 +31,15 @@ with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
 sessions = {}
 _whisper_model = None
 
+BOWL_PHOTOS = {
+    "классическая": "https://smokestationchicago.com/cdn/shop/products/egyptian-clay-hookah-bowl-sku-634-16552480931978.jpg?v=1593616062",
+    "phunnel": "https://upload.wikimedia.org/wikipedia/commons/d/dc/Shisha_Phunnel_Kopf.jpg",
+}
+BOWL_PHOTO_CREDITS = {
+    "классическая": "Фото: Smoke Station — классическая египетская чаша.",
+    "phunnel": "Фото: HookahFloW / Wikimedia Commons, CC BY-SA 4.0.",
+}
+
 CURATED_PAIRINGS = [
     {"name":"Raspberry + Pinkman + Grapefruit","terms":["малина","pinkman","грейпфрут"],"ratio":["30%","30%","40%"],"source":"Hookah House"},
     {"name":"Strawberry Jam + Guava","terms":["клубничный джем","гуава"],"ratio":["70%","30%"],"source":"Fumari"},
@@ -445,13 +454,29 @@ def ratio_numbers(ratios):
     total=sum(out)
     return [(x/total*100 if total else 0) for x in out]
 
-def bowl_technique(rows):
-    max_level=max([row_strength_level(r) or 5 for r in rows] or [5])
-    if max_level >= 8:
-        bowl="Phunnel, 18–22 г; полуплотная/плотная забивка под конкретный табак."
-    else:
-        bowl="Phunnel, 15–20 г; рыхлая/полуплотная забивка."
-    return f"<b>🥣 Чаша:</b> {bowl} Отступ до фольги/HMD — около 2–3 мм."
+def bowl_kind(profile=None):
+    value = norm((profile or {}).get("bowl"))
+    if any(x in value for x in ("класс", "егип", "турец", "традиц")):
+        return "классическая"
+    return "phunnel"
+
+def bowl_technique(rows, profile=None):
+    max_level = max([row_strength_level(r) or 5 for r in rows] or [5])
+    kind = bowl_kind(profile)
+    if kind == "классическая":
+        return "<b>🥣 Чаша:</b> Классическая египетская, 15–20 г. <b>Забивка:</b> рыхло/полуплотно, отверстия не закрывать. <b>Отступ:</b> около 2–3 мм."
+    capacity = "15–20 г" if max_level < 8 else "18–22 г"
+    return f"<b>🥣 Чаша:</b> Phunnel, {capacity}. <b>Забивка:</b> рыхло для светлого табака; плотнее только если этого требует лист. <b>Отступ:</b> около 2–3 мм."
+
+async def send_bowl_photo(message, profile, caption=None):
+    kind = bowl_kind(profile)
+    text = caption or ("🥣 <b>Классическая египетская чаша</b>" if kind == "классическая" else "🥣 <b>Phunnel</b>")
+    text += "\n" + BOWL_PHOTO_CREDITS[kind]
+    try:
+        await message.answer_photo(photo=BOWL_PHOTOS[kind], caption=text)
+        return True
+    except Exception:
+        return False
 
 def detailed_pairing_text(profile, rows):
     result=resolve_pairing_for_rows(rows)
