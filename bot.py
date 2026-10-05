@@ -3,6 +3,8 @@ import base64
 import csv
 import html
 import json
+import logging
+import math
 import os
 import re
 import tempfile
@@ -27,6 +29,8 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://cdn.jsdelivr.net/gh/gostsmoke727-stack/hookah-guest-bot1@main/webapp/index.html").strip()
+
+logger = logging.getLogger("hookah_bot")
 
 with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
     ASSORTMENT = [r for r in csv.DictReader(f) if r.get("Бренд") and r.get("Название")]
@@ -167,7 +171,8 @@ def supabase_request(method, path, body=None, params=""):
         with urllib.request.urlopen(req, timeout=8) as r:
             raw = r.read().decode()
             return json.loads(raw) if raw else True
-    except Exception:
+    except Exception as e:
+        logger.warning("Supabase %s %s failed: %s", method, path, e)
         return None
 
 def load_memory(user_id, message):
@@ -239,7 +244,9 @@ def gemini_text_request(system_prompt,user_prompt):
         with urllib.request.urlopen(req,timeout=25) as response: data=json.loads(response.read().decode())
         parts=data.get("candidates",[{}])[0].get("content",{}).get("parts",[])
         return parse_ai_json("".join(str(p.get("text","")) for p in parts if p.get("text")))
-    except Exception: return None
+    except Exception as e:
+        logger.warning("Gemini request failed: %s", e)
+        return None
 
 def openrouter_request(system_prompt,user_prompt):
     if not OPENROUTER_API_KEY: return None
@@ -248,7 +255,9 @@ def openrouter_request(system_prompt,user_prompt):
     try:
         with urllib.request.urlopen(req,timeout=25) as response: data=json.loads(response.read().decode())
         return parse_ai_json(data["choices"][0]["message"]["content"])
-    except Exception: return None
+    except Exception as e:
+        logger.warning("OpenRouter request failed: %s", e)
+        return None
 
 async def ai_understand(session, user_text):
     prompt = (
@@ -305,7 +314,8 @@ def strength_to_level(value):
     range_match = re.search(r"(?<!\d)(10|[1-9])\s*[-–—]\s*(10|[1-9])(?!\d)", t)
     if range_match:
         a, b = int(range_match.group(1)), int(range_match.group(2))
-        return max(1, min(10, round((a + b) / 2)))
+        level = math.floor((a + b) / 2 + 0.5)
+        return max(1, min(10, level))
     m = re.search(r"(?<!\d)(10|[1-9])(?!\d)", t)
     if m:
         return int(m.group(1))
@@ -762,7 +772,10 @@ def miniapp_url(rows, profile=None):
         }
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     encoded = urllib.parse.quote(raw, safe="")
-    return WEBAPP_URL.rstrip("/") + "/?data=" + encoded
+    url = WEBAPP_URL.rstrip("/") + "/?data=" + encoded
+    if len(url) > 1800:
+        logger.warning("Mini App URL длиной %s символов — риск обрезки в некоторых клиентах", len(url))
+    return url
 
 def miniapp_keyboard(rows, profile=None):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -878,12 +891,6 @@ async def handle_turn(bot, message, user_text):
 
     prefs = session["profile"]
 
-    # Сохраняем предпочтения сразу после сообщения, даже если подбор ещё не нужен.
-    update_memory(
-        session["memory"], ai or {}, prefs,
-        recommendations=None, increment_visit=False
-    )
-
     blocked = prefs["excluded_terms"] + prefs["allergies"]
     has_positive = bool(
         prefs["desired_terms"] or prefs["desired_categories"] or
@@ -894,6 +901,10 @@ async def handle_turn(bot, message, user_text):
     if blocked and not has_positive:
         reply = "Запомнил. Не буду предлагать: " + ", ".join(blocked[-5:]) + "."
         await message.answer(html.escape(reply))
+        update_memory(
+            session["memory"], ai or {}, prefs,
+            recommendations=None, increment_visit=False
+        )
         session["history"] += [
             {"role": "user", "text": user_text},
             {"role": "assistant", "text": reply}
@@ -905,6 +916,10 @@ async def handle_turn(bot, message, user_text):
         if not question:
             question = "Что любишь больше: ягоды, фрукты, цитрус или что-то необычное?"
         await message.answer(html.escape(question[:180]))
+        update_memory(
+            session["memory"], ai or {}, prefs,
+            recommendations=None, increment_visit=False
+        )
         session["history"] += [
             {"role": "user", "text": user_text},
             {"role": "assistant", "text": question[:180]}
@@ -919,6 +934,10 @@ async def handle_turn(bot, message, user_text):
         recs = make_recommendations(rows, diversity_offset=session["turns"] * 3)
 
     if not recs:
+        update_memory(
+            session["memory"], ai or {}, prefs,
+            recommendations=None, increment_visit=False
+        )
         await message.answer(
             "Не нашёл вариант, который одновременно подходит и не нарушает твои запреты. "
             "Скажи, чем можно заменить один из запросов.",
