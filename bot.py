@@ -372,11 +372,9 @@ def build_pairing_text(profile, rows):
     for i, row in enumerate(resolved):
         ratio = pairing["ratio"][i] if i < len(pairing["ratio"]) else ""
         parts.append(f"{ratio} {html.escape(row['Бренд'])} — {html.escape(row['Название'])}".strip())
-    return ("<b>🎯 Готовое сочетание</b>
-" + " + ".join(parts) +
-            f"
-<i>Основа: опубликованный микс {html.escape(pairing['source'])}; "
-            "адаптирован только под позиции из текущего ассортимента.</i>")
+    return ("<b>🎯 Готовое сочетание</b>\n" + " + ".join(parts) +
+            f"\n<i>Основа: опубликованный микс {html.escape(pairing['source'])}; "
+            "показываю его только когда все компоненты найдены в текущем ассортименте.</i>")
 
 def make_recommendations(rows, limit=3, exclude_names=None):
     exclude_names = {norm(x) for x in (exclude_names or [])}
