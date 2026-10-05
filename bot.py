@@ -16,8 +16,8 @@ from aiogram.types import Message
 BASE = Path(__file__).resolve().parent
 CSV_PATH = BASE / "data" / "assortment.csv"
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 LOCAL_WHISPER_MODEL = os.getenv("WHISPER_MODEL", "tiny")
 
 with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
@@ -116,28 +116,28 @@ def merge_profile(old, data):
             p[key] = value
     return p
 
-def gemini_request(parts):
-    if not GEMINI_API_KEY:
+def openrouter_request(user_prompt):
+    if not OPENROUTER_API_KEY:
         return None
     payload = {
-        "system_instruction": {"parts": [{"text": AI_SYSTEM}]},
-        "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {
-            "temperature": 0.15,
-            "responseMimeType": "application/json",
-        },
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": AI_SYSTEM},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.15,
+        "max_tokens": 350,
+        "response_format": {"type": "json_object"},
     }
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        + GEMINI_MODEL
-        + ":generateContent"
-    )
+    url = "https://openrouter.ai/api/v1/chat/completions"
     req = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_API_KEY,
+            "Authorization": "Bearer " + OPENROUTER_API_KEY,
+            "HTTP-Referer": "https://github.com/gostsmoke727-stack/hookah-guest-bot1",
+            "X-Title": "Hookah Guest Bot",
         },
         method="POST",
     )
@@ -145,7 +145,7 @@ def gemini_request(parts):
         with urllib.request.urlopen(req, timeout=25) as response:
             raw = response.read().decode("utf-8")
         data = json.loads(raw)
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        text = data["choices"][0]["message"]["content"]
         return json.loads(text)
     except Exception:
         return None
@@ -153,31 +153,15 @@ def gemini_request(parts):
 async def ai_understand(session, user_text=None, audio_bytes=None, mime_type="audio/ogg"):
     profile_json = json.dumps(session["profile"], ensure_ascii=False)
     history = json.dumps(session["history"][-8:], ensure_ascii=False)
-
     context = (
         "ТЕКУЩИЙ ПРОФИЛЬ:\\n" + profile_json +
         "\\nИСТОРИЯ ДИАЛОГА:\\n" + history +
         "\\nСделай следующий ход диалога."
     )
-
     if audio_bytes is not None:
-        parts = [
-            {"text": context + """
-Это голосовое сообщение гостя. Сначала точно пойми его смысл и извлеки все пожелания.
-Не показывай расшифровку гостю. Ответь коротко и естественно."""},
-            {"inlineData": {
-                "mimeType": mime_type,
-                "data": base64.b64encode(audio_bytes).decode("ascii"),
-            }},
-        ]
-    else:
-        parts = [{"text": context + "\\nСООБЩЕНИЕ ГОСТЯ:\\n" + (user_text or "")}]
-
-    result = await asyncio.to_thread(gemini_request, parts)
-    if result:
-        return result
-
-    return None
+        return None
+    prompt = context + "\\nСООБЩЕНИЕ ГОСТЯ:\\n" + (user_text or "")
+    return await asyncio.to_thread(openrouter_request, prompt)
 
 def load_local_whisper():
     global _whisper_model
@@ -364,7 +348,7 @@ async def handle_turn(bot, message, user_text=None, audio_bytes=None):
         sessions.pop(message.from_user.id, None)
         return
 
-    # AI unavailable: keep the bot usable, but do not pretend it is AI.
+    # AI unavailable: keep the bot usable with local rules.
     if user_text:
         fallback = local_profile_from_text(user_text)
         session["profile"] = merge_profile(session["profile"], fallback)
@@ -374,7 +358,7 @@ async def handle_turn(bot, message, user_text=None, audio_bytes=None):
             sessions.pop(message.from_user.id, None)
             return
     await message.answer(
-        "Сейчас AI не отвечает. Напиши пожелания текстом ещё раз — я попробую подобрать из ассортимента."
+        "Сейчас AI недоступен. Напиши пожелания текстом ещё раз — я попробую подобрать из ассортимента."
     )
 
 async def main():
@@ -397,7 +381,7 @@ async def main():
 
     @dp.message(F.voice)
     async def voice(message: Message):
-        if GEMINI_API_KEY:
+        if OPENROUTER_API_KEY:
             await message.answer("🎙️ Слушаю…")
             tg_file = await bot.get_file(message.voice.file_id)
             with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
@@ -406,7 +390,11 @@ async def main():
                 await bot.download(tg_file, destination=path)
                 with open(path, "rb") as f:
                     audio = f.read()
-                await handle_turn(bot, message, audio_bytes=audio, user_text=None)
+                text = await local_transcribe(path)
+                if text:
+                    await handle_turn(bot, message, user_text=text)
+                else:
+                    await message.answer("Не разобрал голосовое. Попробуй ещё раз или напиши текстом.")
             finally:
                 try:
                     os.remove(path)
