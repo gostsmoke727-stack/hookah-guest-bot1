@@ -14,7 +14,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 290
+    timeout-minutes: 350
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,5 +42,11 @@ jobs:
           GEMINI_MODEL: gemini-3.6-flash
         run: |
           test -n "$BOT_TOKEN" || { echo "BOT_TOKEN secret is not configured"; exit 1; }
+          test -n "$SUPABASE_URL" || { echo "SUPABASE_URL secret is not configured"; exit 1; }
+          test -n "$SUPABASE_KEY" || { echo "SUPABASE_KEY secret is not configured"; exit 1; }
+          echo "Checking Telegram credentials..."
+          curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/getMe" | grep -q '"ok":true' || { echo "Telegram BOT_TOKEN check failed"; exit 1; }
+          echo "Checking Supabase..."
+          curl -fsS -H "apikey: ${SUPABASE_KEY}" -H "Authorization: Bearer ${SUPABASE_KEY}" "${SUPABASE_URL}/rest/v1/guest_memory?select=user_id&limit=1" >/dev/null || { echo "Supabase check failed"; exit 1; }
           python -m py_compile bot.py
           python bot.py
