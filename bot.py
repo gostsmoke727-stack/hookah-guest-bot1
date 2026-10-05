@@ -12,9 +12,9 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, BotCommand
 
 BASE = Path(__file__).resolve().parent
 CSV_PATH = BASE / "data" / "assortment.csv"
@@ -29,6 +29,7 @@ with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
     ASSORTMENT = [r for r in csv.DictReader(f) if r.get("Бренд") and r.get("Название")]
 
 sessions = {}
+_whisper_model = None
 
 CURATED_PAIRINGS = [
     {"name":"Raspberry + Pinkman + Grapefruit","terms":["малина","pinkman","грейпфрут"],"ratio":["30%","30%","40%"],"source":"Hookah House"},
@@ -101,7 +102,7 @@ def empty_memory(user_id, message):
         "style": "дружелюбно",
         "likes": [], "dislikes": [], "allergies": [],
         "usual_strength": None, "usual_bowl": None,
-        "favorite_flavors": [], "favorite_mixes": [], "last_hookahs": [],
+        "favorite_flavors": [], "favorite_mixes": [], "last_hookahs": [], "favorite_mixes": [],
         "visit_count": 0, "last_seen": now_iso()
     }
 
@@ -394,6 +395,109 @@ def find_curated_pairing(profile, rows):
     candidates.sort(key=lambda x: -x[0])
     return candidates[0][1], candidates[0][2]
 
+
+def recipe_strength_score(resolved, ratios):
+    weights = {"легкие": 3, "легкая": 3, "средние": 5, "средняя": 5, "крепкие": 8, "крепкий": 8, "крепкая": 8}
+    total = 0.0
+    for row, ratio in zip(resolved, ratios):
+        try:
+            pct = float(str(ratio).replace("%", "").replace(",", "."))
+        except ValueError:
+            pct = 0
+        total += weights.get(norm(row.get("Крепость", "")), 5) * pct / 100
+    return max(1, min(10, round(total)))
+
+def find_substitute(row, target_level=None):
+    direction = norm(row.get("Направление", ""))
+    category = norm(row.get("Категория", ""))
+    target = target_level or row_strength_level(row) or 5
+    pool = []
+    for candidate in ASSORTMENT:
+        if candidate["Бренд"] == row["Бренд"] and candidate["Название"] == row["Название"]:
+            continue
+        same_family = norm(candidate.get("Направление", "")) == direction or norm(candidate.get("Категория", "")) == category
+        if not same_family:
+            continue
+        pool.append((abs((row_strength_level(candidate) or 5) - target), candidate))
+    pool.sort(key=lambda x: (x[0], norm(x[1]["Название"])))
+    return pool[0][1] if pool else None
+
+def resolve_pairing_for_rows(rows):
+    names = {(norm(r["Бренд"]), norm(r["Название"])) for r in rows}
+    for pairing in CURATED_PAIRINGS:
+        resolved = []
+        ok = True
+        for term in pairing["terms"]:
+            found = [r for r in ASSORTMENT if term_matches(r, term) and (norm(r["Бренд"]), norm(r["Название"])) in names]
+            if not found:
+                ok = False
+                break
+            resolved.append(found[0])
+        if ok:
+            return pairing, resolved
+    return None
+
+def detailed_pairing_text(profile, rows):
+    result = resolve_pairing_for_rows(rows)
+    if not result:
+        if len(rows) == 1:
+            row = rows[0]
+            lvl = row_strength_level(row) or 5
+            return (
+                "<b>🧾 Подробный состав</b>\\n\\n"
+                f"<b>{html.escape(row['Бренд'])} — {html.escape(row['Название'])}</b>\\n"
+                "100% одного вкуса.\\n\\n"
+                f"<b>Расчётная крепость:</b> {strength_label(lvl)}.\\n"
+                "<b>Чаша:</b> влажный/сочный табак — phunnel; более сухой классический — традиционная многодырочная.\\n"
+                "<b>Забивка:</b> рыхлая для лёгкого/среднего табака, без сильного прижима; верх ровно под край, без контакта с фольгой/HMD.\\n\\n"
+                "<i>Точный рецепт микса для этой позиции не выдумываю без подтверждённой пропорции.</i>"
+            )
+        return "<b>🧾 Подробный состав</b>\\n\\nДля этого сочетания нет подтверждённого рецепта с пропорциями в моей базе. Я не буду выдавать выдуманную пропорцию за проверенную."
+    pairing, resolved = result
+    ratios = pairing["ratio"]
+    level = recipe_strength_score(resolved, ratios)
+    lines = [
+        "<b>🧾 Подробный состав</b>", "",
+        f"<b>{html.escape(pairing['name'])}</b>",
+        f"Источник рецепта: {html.escape(pairing['source'])}", ""
+    ]
+    for row, ratio in zip(resolved, ratios):
+        lines.append(f"• <b>{html.escape(ratio)}</b> — {html.escape(row['Бренд'])} — {html.escape(row['Название'])}")
+    lines += [
+        "", f"<b>Расчётная крепость микса:</b> {strength_label(level)}.",
+        "Это рабочая шкала по крепости компонентов и их долям, а не лабораторное измерение никотина.",
+        "", "<b>🥣 Чаша</b>",
+        "Для сочного современного табака — phunnel, чтобы сок оставался в чаше. Для более сухого классического табака — традиционная многодырочная чаша.",
+        "", "<b>👐 Забивка</b>",
+        "Разрыхлить табак, убрать крупные стебли, смешать компоненты отдельно и равномерно распределить. Не утрамбовывать без необходимости. Верх — под край, без прямого контакта с фольгой/HMD.",
+        "", "<b>🔥 Жар</b>",
+        "Начинать умеренно и повышать жар постепенно. Резкость/гарь — уменьшить жар; плоский вкус и слабый пар — немного добавить жар.",
+        "", "<b>🪶 Как сделать легче</b>"
+    ]
+    for row in resolved:
+        sub = find_substitute(row, 3)
+        if sub:
+            lines.append(f"• Вместо {html.escape(row['Название'])}: {html.escape(sub['Бренд'])} — {html.escape(sub['Название'])}.")
+    lines += ["", "<b>💪 Как сделать крепче</b>"]
+    for row in resolved:
+        sub = find_substitute(row, 8)
+        if sub:
+            lines.append(f"• Вместо {html.escape(row['Название'])}: {html.escape(sub['Бренд'])} — {html.escape(sub['Название'])}.")
+    lines += ["", "<b>🔁 Если компонента нет</b>"]
+    for row in resolved:
+        sub = find_substitute(row)
+        if sub:
+            lines.append(f"• {html.escape(row['Название'])} → {html.escape(sub['Бренд'])} — {html.escape(sub['Название'])}.")
+    lines += ["", "<b>Важно:</b> фактическое никотиновое воздействие зависит от конкретного табака, температуры, длительности и человека; 1–10 здесь — практическая шкала подбора."]
+    return "\n".join(lines)
+
+def favorite_mix_from_rows(rows, source=""):
+    return {
+        "name": " + ".join(r["Бренд"] + " — " + r["Название"] for r in rows),
+        "components": [{"brand": r["Бренд"], "name": r["Название"], "strength": r.get("Крепость", ""), "direction": r.get("Направление", ""), "category": r.get("Категория", "")} for r in rows],
+        "source": source, "saved_at": now_iso()
+    }
+
 def build_pairing_text(profile, rows):
     result = find_curated_pairing(profile, rows)
     if not result:
@@ -593,11 +697,13 @@ def menu_keyboard():
 def keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔥 Подобрать", callback_data="new"),
-         InlineKeyboardButton(text="🧠 Мой профиль", callback_data="profile")],
+         InlineKeyboardButton(text="📋 Все команды", callback_data="menu")],
+        [InlineKeyboardButton(text="🧾 Подробный состав", callback_data="details"),
+         InlineKeyboardButton(text="💾 Запомнить", callback_data="remember")],
         [InlineKeyboardButton(text="🔄 Ещё вариант", callback_data="again"),
-         InlineKeyboardButton(text="🧹 Сбросить", callback_data="forget")]
+         InlineKeyboardButton(text="🧠 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="🧹 Сбросить память", callback_data="forget")]
     ])
-
 def profile_text(memory):
     return (
         f"<b>🧠 Профиль {html.escape(memory.get('name') or 'гостя')}</b>\n\n"
@@ -652,7 +758,7 @@ async def handle_turn(bot, message, user_text):
         "profile": profile_from_memory(load_memory(message.from_user.id, message)),
         "history": [],
         "memory": load_memory(message.from_user.id, message),
-        "turns": 0, "shown": [], "counted": False
+        "turns": 0, "shown": [], "last_recs": [], "counted": False
     })
     session["turns"] += 1
 
@@ -725,6 +831,7 @@ async def handle_turn(bot, message, user_text):
         session.get("shown", []),
         [r["Бренд"] + " — " + r["Название"] for r in recs]
     )
+    session["last_recs"] = recs
     session["history"] += [
         {"role": "user", "text": user_text},
         {"role": "assistant", "text": "recommendations"}
@@ -741,6 +848,42 @@ async def handle_turn(bot, message, user_text):
         result_text = html.escape(reply[:600]) + "\n\n" + result_text
 
     await message.answer(result_text, reply_markup=keyboard())
+
+
+async def show_menu(message):
+    await message.answer(
+        "<b>📋 Команды бота</b>\\n\\n"
+        "<b>🔥 Подобрать</b> — новый подбор.\\n"
+        "<b>🔄 Ещё вариант</b> — другой вариант без повторения недавних.\\n"
+        "<b>💾 Запомни</b> — сохранить последнее понравившееся сочетание.\\n"
+        "<b>🧾 Подробный состав</b> — рецепт, пропорции, расчётная крепость, чаша, забивка, жар и замены.\\n"
+        "<b>🧠 Мой профиль</b> — что бот запомнил.\\n"
+        "<b>🧹 Сбросить память</b> — очистить предпочтения.\\n\\n"
+        "Можно писать обычным языком или отправлять голосовые."
+    )
+
+async def remember_last_mix(message):
+    session = sessions.get(message.from_user.id)
+    if not session or not session.get("last_recs"):
+        await message.answer("Сначала сделай подбор и выбери понравившийся вариант.", reply_markup=keyboard())
+        return
+    recs = session["last_recs"]
+    pairing = resolve_pairing_for_rows(recs)
+    mix = favorite_mix_from_rows(recs, pairing[0]["source"] if pairing else "подбор бота")
+    memory = session["memory"]
+    favorites = list(memory.get("favorite_mixes") or [])
+    key = {norm(x["brand"]+" — "+x["name"]) for x in mix["components"]}
+    favorites = [x for x in favorites if {norm(y.get("brand","")+" — "+y.get("name","")) for y in x.get("components",[])} != key]
+    memory["favorite_mixes"] = (favorites + [mix])[-20:]
+    save_memory(memory)
+    await message.answer("💾 <b>Запомнил.</b>\\n\\n" + html.escape(mix["name"]), reply_markup=keyboard())
+
+async def show_details(message):
+    session = sessions.get(message.from_user.id)
+    if not session or not session.get("last_recs"):
+        await message.answer("Сначала сделай подбор — тогда я смогу раскрыть конкретный состав.", reply_markup=keyboard())
+        return
+    await message.answer(detailed_pairing_text(session["profile"], session["last_recs"]), reply_markup=keyboard())
 
 async def main():
     if not BOT_TOKEN:
@@ -770,6 +913,21 @@ async def main():
             "Скажи просто: чего хочется сегодня?",
             reply_markup=menu_keyboard()
         )
+
+    @dp.callback_query(F.data == "menu")
+    async def menu_callback(call: CallbackQuery):
+        await call.answer()
+        await show_menu(call.message)
+
+    @dp.callback_query(F.data == "remember")
+    async def remember_callback(call: CallbackQuery):
+        await call.answer()
+        await remember_last_mix(call.message)
+
+    @dp.callback_query(F.data == "details")
+    async def details_callback(call: CallbackQuery):
+        await call.answer()
+        await show_details(call.message)
 
     @dp.callback_query(F.data == "new")
     async def new_chat(call: CallbackQuery):
@@ -837,6 +995,7 @@ async def main():
         if not recs:
             recs = make_recommendations(rows, diversity_offset=session["turns"] * 3 + 1)
         session["shown"] = merge_unique(session.get("shown"), [r["Бренд"] + " — " + r["Название"] for r in recs])
+        session["last_recs"] = recs
         await call.answer()
         if recs:
             await call.message.answer(build_result(session["profile"], recs, session["memory"]),
@@ -844,6 +1003,30 @@ async def main():
         else:
             await call.message.answer("Дай ещё одно пожелание — и я докручу подбор.",
                                       reply_markup=keyboard())
+
+    @dp.message(Command("menu"))
+    async def menu_command(message: Message):
+        await show_menu(message)
+
+    @dp.message(Command("remember"))
+    async def remember_command(message: Message):
+        await remember_last_mix(message)
+
+    @dp.message(Command("details"))
+    async def details_command(message: Message):
+        await show_details(message)
+
+    @dp.message(Command("profile"))
+    async def profile_command(message: Message):
+        memory = load_memory(message.from_user.id, message)
+        await message.answer(profile_text(memory), reply_markup=keyboard())
+
+    @dp.message(Command("reset"))
+    async def reset_command(message: Message):
+        memory = empty_memory(message.from_user.id, message)
+        save_memory(memory)
+        sessions.pop(message.from_user.id, None)
+        await message.answer("Память очищена.", reply_markup=keyboard())
 
     @dp.message(F.voice)
     async def voice(message: Message):
@@ -876,8 +1059,19 @@ async def main():
 
     @dp.message(F.text)
     async def text_message(message: Message):
-        if message.text and message.text.strip():
-            await handle_turn(bot, message, message.text.strip())
+        text = (message.text or "").strip()
+        nt = norm(text)
+        if nt in {"запомни", "запомни это", "запомнить", "сохрани", "сохрани это"}:
+            await remember_last_mix(message)
+            return
+        if nt in {"подробный состав", "подробно", "состав", "рецепт"}:
+            await show_details(message)
+            return
+        if nt in {"меню", "команды", "команды бота"}:
+            await show_menu(message)
+            return
+        if text:
+            await handle_turn(bot, message, text)
 
     await dp.start_polling(bot)
 
