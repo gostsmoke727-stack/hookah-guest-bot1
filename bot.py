@@ -391,7 +391,15 @@ def find_curated_pairing(profile, rows):
             continue
         if norm(profile.get("freshness")).startswith(("без", "не")) and any(term_matches(r, "мята") for r in resolved):
             continue
-        score = sum(5 for wanted in desired if any(term_matches(r, wanted) for r in resolved))
+        # Если гость задал несколько положительных осей, рецепт обязан закрывать каждую.
+        # Например: "ягоды + тропики" нельзя сводить только к ягодам.
+        axis_hits = [
+            any(term_matches(r, wanted) for r in resolved)
+            for wanted in desired
+        ]
+        if desired and not all(axis_hits):
+            continue
+        score = sum(5 for hit in axis_hits if hit)
         candidates.append((score, pairing, resolved))
     if not candidates:
         return None
