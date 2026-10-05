@@ -37,6 +37,37 @@ jobs:
         run: |
           python -c "import faster_whisper; from aiogram import Bot; import bot; print('Imports OK')"
 
+      - name: Recommendation smoke tests
+        run: |
+          python - <<'PY'
+          from bot import ASSORTMENT, empty_memory, local_profile_from_text, make_recommendations, score_candidates, term_matches
+
+          text = "не хочу ананас, маракую, хочу какие-нибудь ягоды с тропиками покурить и хочу на классической чаше."
+          profile = local_profile_from_text(text)
+          assert "ананас" in profile["excluded_terms"], profile
+          assert "маракуйя" in profile["excluded_terms"], profile
+          assert "ягоды" in profile["desired_terms"], profile
+          assert "тропики" in profile["desired_terms"], profile
+          assert profile["bowl"] == "Классическая чаша", profile
+
+          memory = {"favorite_flavors": [], "likes": [], "last_hookahs": []}
+          rows = score_candidates(profile, memory)
+          recs = make_recommendations(rows, profile=profile)
+          assert recs, "no recommendations"
+          assert not any(term_matches(r, "ананас") or term_matches(r, "маракуйя") for r in recs), recs
+          assert any(term_matches(r, "ягоды") for r in recs), recs
+          assert any(term_matches(r, "тропики") for r in recs), recs
+
+          tea = local_profile_from_text("Что-то тропическое и чайное на 5-6")
+          assert "тропики" in tea["desired_terms"] and "чай" in tea["desired_terms"], tea
+          assert tea["strength_level"] == 6, tea
+          tea_rows = score_candidates(tea, memory)
+          tea_recs = make_recommendations(tea_rows, profile=tea)
+          assert any(term_matches(r, "тропики") for r in tea_recs), tea_recs
+          assert any(term_matches(r, "чай") for r in tea_recs), tea_recs
+          print("Recommendation smoke tests OK")
+          PY
+
       - name: Publish syntax error for diagnostics
         if: failure() && steps.syntax.outcome == 'failure'
         uses: actions/github-script@v7
