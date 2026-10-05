@@ -671,7 +671,7 @@ def detailed_recipe_text(rows, profile):
         lines.append("🧪 <b>Авторский расчёт:</b> пропорции не выдаются за опубликованный рецепт.")
     lines += ["", "<b>⚖️ Что забивать</b>"]
     for row, ratio in zip(recipe["rows"], recipe["ratios"]):
-        m = re.search(r"(\\d+(?:[.,]\\d+)?)", str(ratio))
+        m = re.search(r"(\d+(?:[.,]\d+)?)", str(ratio))
         pct = float(m.group(1).replace(",", ".")) if m else 0.0
         grams = round(20 * pct / 100, 1)
         lines.append(f"• <b>{ratio}</b> — {html.escape(row['Бренд'])} — {html.escape(row['Название'])} → <b>{grams:g} г</b> на чашу 20 г")
