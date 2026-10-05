@@ -10,7 +10,7 @@ import re
 import tempfile
 import urllib.request
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
@@ -156,24 +156,56 @@ def merge_profile(old, data):
 def supabase_request(method, path, body=None, params=""):
     if not SUPABASE_URL or not SUPABASE_KEY:
         return None
-    req = urllib.request.Request(
-        SUPABASE_URL + path + params,
-        data=None if body is None else json.dumps(body, ensure_ascii=False).encode(),
-        headers={
-            "apikey": SUPABASE_KEY,
-            "Authorization": "Bearer " + SUPABASE_KEY,
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates,return=minimal",
-        },
-        method=method,
-    )
+
+    payload = None if body is None else json.dumps(body, ensure_ascii=False).encode()
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": "Bearer " + SUPABASE_KEY,
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+
+    for attempt in range(2):
+        req = urllib.request.Request(
+            SUPABASE_URL + path + params,
+            data=payload,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as r:
+                raw = r.read().decode()
+                return json.loads(raw) if raw else True
+        except urllib.error.HTTPError as e:
+            if e.code in {408, 409, 429, 500, 502, 503, 504} and attempt == 0:
+                logger.warning("Supabase %s %s transient HTTP %s; retrying once", method, path, e.code)
+                continue
+            logger.warning("Supabase %s %s failed: HTTP %s", method, path, e.code)
+            return None
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if attempt == 0:
+                logger.warning("Supabase %s %s network error; retrying once: %s", method, path, e)
+                continue
+            logger.warning("Supabase %s %s failed after retry: %s", method, path, e)
+            return None
+        except Exception as e:
+            logger.warning("Supabase %s %s failed: %s", method, path, e)
+            return None
+
+    return None
+
+def should_count_visit(memory, hours=6):
+    last_seen = str(memory.get("last_seen") or "").strip()
+    if not last_seen:
+        return True
     try:
-        with urllib.request.urlopen(req, timeout=8) as r:
-            raw = r.read().decode()
-            return json.loads(raw) if raw else True
-    except Exception as e:
-        logger.warning("Supabase %s %s failed: %s", method, path, e)
-        return None
+        last = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - last >= timedelta(hours=hours)
+    except (TypeError, ValueError):
+        return True
+
 
 def load_memory(user_id, message):
     fallback = empty_memory(user_id, message)
@@ -577,26 +609,66 @@ def build_pairing_text(profile, rows):
             f"\n<i>Основа: опубликованный микс {html.escape(pairing['source'])}; "
             "показываю его только когда все компоненты найдены в текущем ассортименте.</i>")
 
-def make_recommendations(rows, limit=3, exclude_names=None, diversity_offset=0):
+def make_recommendations(rows, limit=3, exclude_names=None, diversity_offset=0, profile=None):
     exclude_names = {norm(x) for x in (exclude_names or [])}
     pool = [r for r in rows if norm(r["Бренд"] + " — " + r["Название"]) not in exclude_names]
     if not pool:
         return []
+
     start = diversity_offset % len(pool)
     rotated = pool[start:] + pool[:start]
     selected, brands = [], set()
-    for row in rotated:
-        if row["Бренд"] not in brands:
+
+    # Несколько положительных осей должны быть покрыты коллективно.
+    # Например, «ягоды + тропики» должен дать набор, где встречаются обе оси.
+    wanted_axes = []
+    if profile:
+        for wanted in list(profile.get("desired_terms") or []) + list(profile.get("desired_categories") or []):
+            wanted = canonical_term(wanted)
+            if wanted and wanted not in wanted_axes:
+                wanted_axes.append(wanted)
+
+    if wanted_axes:
+        uncovered = set(wanted_axes)
+        while uncovered and len(selected) < limit:
+            candidates = []
+            for row in rotated:
+                if row in selected:
+                    continue
+                covered = {axis for axis in uncovered if term_matches(row, axis)}
+                if covered:
+                    candidates.append((len(covered), row))
+            if not candidates:
+                break
+            candidates.sort(
+                key=lambda item: (
+                    -item[0],
+                    rotated.index(item[1]),
+                    norm(item[1]["Бренд"]),
+                    norm(item[1]["Название"]),
+                )
+            )
+            row = candidates[0][1]
             selected.append(row)
             brands.add(row["Бренд"])
+            uncovered -= {axis for axis in uncovered if term_matches(row, axis)}
+
+    # Добираем результаты, сохраняя разнообразие брендов.
+    for row in rotated:
         if len(selected) >= limit:
             break
+        if row in selected or row["Бренд"] in brands:
+            continue
+        selected.append(row)
+        brands.add(row["Бренд"])
+
     if len(selected) < limit:
         for row in rotated:
             if row not in selected:
                 selected.append(row)
             if len(selected) >= limit:
                 break
+
     return selected[:limit]
 
 
@@ -649,11 +721,18 @@ def local_profile_from_text(text):
     if "чай" in t: p["desired_terms"].append("чай")
     for axis in ("сладкое", "кислое", "свежее", "цитрус"):
         if axis in t: p["desired_terms"].append(axis)
-    for match in re.finditer(r"(?:не хочу|не люблю|без|не надо|аллергия на)\s+([^.!?\n]+)", t):
+
+    exclusion_pattern = r"(?:не хочу|не люблю|без|не надо|аллергия на)\s+(.+?)(?=(?:\s+(?:хочу|желательно|предпочитаю|буду|люблю|нравится)\b|[.!?\n]|$))"
+    for match in re.finditer(exclusion_pattern, t):
         for token in re.split(r"[,;]+|\s+и\s+", match.group(1)):
-            token = token.strip()
-            if len(token) > 2 and token not in {"табак","вкус","вкусы","кальян"}:
+            token = token.strip(" ,;")
+            if not token or token in {"табак", "вкус", "вкусы", "кальян"}:
+                continue
+            if "хочу" in token or "желательно" in token:
+                break
+            if len(token) > 2:
                 p["excluded_terms"].append(canonical_term(token))
+
     if "класс" in t:
         p["bowl"] = "Классическая чаша"
     level = strength_to_level(t)
@@ -666,7 +745,6 @@ def local_profile_from_text(text):
         p["freshness"] = "без свежести/холода"
         p["excluded_terms"].append("мята")
     return p
-
 
 
 def recipe_for_selection(rows, profile):
@@ -927,7 +1005,7 @@ async def handle_turn(bot, message, user_text):
         return
 
     rows = score_candidates(prefs, session["memory"])
-    recs = make_recommendations(rows, exclude_names=session.get("shown", []) + list(recent_names(session["memory"])), diversity_offset=session["turns"] * 3)
+    recs = make_recommendations(rows, exclude_names=session.get("shown", []) + list(recent_names(session["memory"])), diversity_offset=session["turns"] * 3, profile=prefs)
     if not recs:
         recs = make_recommendations(rows, exclude_names=session.get("shown", []), diversity_offset=session["turns"] * 3)
     if not recs:
@@ -945,12 +1023,11 @@ async def handle_turn(bot, message, user_text):
         )
         return
 
-    if not session.get("counted"):
-        update_memory(
-            session["memory"], ai or {}, prefs,
-            recommendations=recs, increment_visit=True
-        )
-        session["counted"] = True
+    update_memory(
+        session["memory"], ai or {}, prefs,
+        recommendations=recs,
+        increment_visit=should_count_visit(session["memory"])
+    )
 
     session["shown"] = merge_unique(
         session.get("shown", []),
@@ -1222,9 +1299,10 @@ async def main():
                 rows,
                 exclude_names=session.get("shown", []),
                 diversity_offset=session["turns"] * 5,
+                profile=session["profile"],
             )
         if not recs:
-            recs = make_recommendations(rows, diversity_offset=session["turns"] * 5)
+            recs = make_recommendations(rows, diversity_offset=session["turns"] * 5, profile=session["profile"])
 
         if recs:
             session["last_mix_rows"] = recs
