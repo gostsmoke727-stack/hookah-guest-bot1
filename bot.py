@@ -494,7 +494,13 @@ async def transcribe_voice(bot, message):
                 WhisperModel, WHISPER_MODEL, device="cpu", compute_type="int8"
             )
         segments, _ = await asyncio.to_thread(
-            _whisper_model.transcribe, path, language="ru", vad_filter=True, beam_size=1
+            _whisper_model.transcribe,
+            path,
+            language="ru",
+            vad_filter=True,
+            beam_size=1,
+            condition_on_previous_text=False,
+            without_timestamps=True
         )
         return " ".join(s.text.strip() for s in segments).strip()
     finally:
@@ -505,81 +511,111 @@ async def transcribe_voice(bot, message):
 
 async def handle_turn(bot, message, user_text):
     session = sessions.setdefault(message.from_user.id, {
-        "profile": empty_profile(), "history": [],
-        "memory": load_memory(message.from_user.id, message), "turns": 0, "shown": [], "counted": False
+        "profile": profile_from_memory(load_memory(message.from_user.id, message)),
+        "history": [],
+        "memory": load_memory(message.from_user.id, message),
+        "turns": 0, "shown": [], "counted": False
     })
     session["turns"] += 1
-    ai = await ai_understand(session, user_text)
 
+    ai = await ai_understand(session, user_text)
     if ai:
         session["profile"] = merge_profile(session["profile"], ai)
-        prefs = session["profile"]
-        explicit = (
-            len(prefs["desired_terms"]) + len(prefs["desired_categories"]) +
-            len(prefs["excluded_terms"]) + len(prefs["allergies"]) +
-            bool(prefs.get("strength")) + bool(prefs.get("bowl"))
+    else:
+        session["profile"] = merge_profile(
+            session["profile"], local_profile_from_text(user_text)
         )
-        ready = as_bool(ai.get("ready"))
-        if session["turns"] == 1 and explicit < 2:
-            ready = False
 
-        if not ready and session["turns"] < 3:
-            question = str(ai.get("clarifying_question") or "").strip()
-            if not question:
-                question = "Больше хочется ягодное, фруктовое, свежее или необычное?"
-            await message.answer(question)
-            session["history"] += [
-                {"role": "user", "text": user_text},
-                {"role": "assistant", "text": question}
-            ]
-            return
+    prefs = session["profile"]
 
-    if not ai:
-        fallback = local_profile_from_text(user_text)
-        session["profile"] = merge_profile(session["profile"], fallback)
-        if not session["profile"]["desired_terms"] and not session["profile"]["desired_categories"]:
-            await message.answer(
-                "Скажи одним предложением, чего хочется — например: "
-                "«ягоды, не слишком сладко, без мяты, средняя крепость».",
-                reply_markup=keyboard()
-            )
-            return
+    # Сохраняем предпочтения сразу после сообщения, даже если подбор ещё не нужен.
+    update_memory(
+        session["memory"], ai or {}, prefs,
+        recommendations=None, increment_visit=False
+    )
 
-    rows = score_candidates(session["profile"], session["memory"])
+    blocked = prefs["excluded_terms"] + prefs["allergies"]
+    has_positive = bool(
+        prefs["desired_terms"] or prefs["desired_categories"] or
+        prefs.get("strength") or prefs.get("bowl")
+    )
+
+    # Сообщение только о запрете/нежелании: фиксируем и продолжаем короткий диалог.
+    if blocked and not has_positive:
+        reply = "Запомнил. Не буду предлагать: " + ", ".join(blocked[-5:]) + "."
+        await message.answer(html.escape(reply))
+        session["history"] += [
+            {"role": "user", "text": user_text},
+            {"role": "assistant", "text": reply}
+        ]
+        return
+
+    if not has_positive:
+        question = str((ai or {}).get("clarifying_question") or "").strip()
+        if not question:
+            question = "Что любишь больше: ягоды, фрукты, цитрус или что-то необычное?"
+        await message.answer(html.escape(question[:180]))
+        session["history"] += [
+            {"role": "user", "text": user_text},
+            {"role": "assistant", "text": question[:180]}
+        ]
+        return
+
+    rows = score_candidates(prefs, session["memory"])
     recs = make_recommendations(rows, exclude_names=session.get("shown", []))
     if not recs:
         session["shown"] = []
         recs = make_recommendations(rows)
+
     if not recs:
         await message.answer(
-            "В текущем ассортименте нет варианта, который одновременно подходит "
-            "и не нарушает твои запреты. Давай поменяем только один параметр.",
+            "Не нашёл вариант, который одновременно подходит и не нарушает твои запреты. "
+            "Скажи, чем можно заменить один из запросов.",
             reply_markup=keyboard()
         )
         return
 
     if not session.get("counted"):
-        update_memory(session["memory"], ai or {}, session["profile"], recs, increment_visit=True)
+        update_memory(
+            session["memory"], ai or {}, prefs,
+            recommendations=recs, increment_visit=True
+        )
         session["counted"] = True
-    session["shown"] = merge_unique(session.get("shown"), [r["Бренд"] + " — " + r["Название"] for r in recs])
+
+    session["shown"] = merge_unique(
+        session.get("shown", []),
+        [r["Бренд"] + " — " + r["Название"] for r in recs]
+    )
     session["history"] += [
         {"role": "user", "text": user_text},
         {"role": "assistant", "text": "recommendations"}
     ]
+
     reply = str((ai or {}).get("reply") or "").strip()
-    wants_mix = any(x in norm(user_text) for x in ("микс", "сочетание", "рецепт", "пропорци"))
-    pairing_text = build_pairing_text(session["profile"], ASSORTMENT) if wants_mix else ""
-    result_text = build_result(session["profile"], recs, session["memory"], pairing_text)
+    wants_mix = any(
+        x in norm(user_text)
+        for x in ("микс", "сочетание", "рецепт", "пропорци")
+    )
+    pairing_text = build_pairing_text(prefs, ASSORTMENT) if wants_mix else ""
+    result_text = build_result(prefs, recs, session["memory"], pairing_text)
     if reply:
         result_text = html.escape(reply[:220]) + "\n\n" + result_text
-    await message.answer(result_text,
-                         reply_markup=keyboard())
+
+    await message.answer(result_text, reply_markup=keyboard())
 
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+
+    # Загружаем Whisper при старте, чтобы первое голосовое не ждало загрузку модели.
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        _whisper_model = await asyncio.to_thread(
+            WhisperModel, WHISPER_MODEL, device="cpu", compute_type="int8"
+        )
 
     @dp.message(CommandStart())
     async def start(message: Message):
@@ -598,7 +634,7 @@ async def main():
     @dp.callback_query(F.data == "new")
     async def new_chat(call: CallbackQuery):
         sessions[call.from_user.id] = {
-            "profile": empty_profile(), "history": [],
+            "profile": profile_from_memory(load_memory(call.from_user.id, call.message)), "history": [],
             "memory": load_memory(call.from_user.id, call.message), "turns": 0, "shown": [], "counted": False
         }
         await call.answer()
