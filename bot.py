@@ -15,7 +15,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, BotCommand
+from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, BotCommand, WebAppInfo
 
 BASE = Path(__file__).resolve().parent
 CSV_PATH = BASE / "data" / "assortment.csv"
@@ -25,7 +25,7 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()\nWEBAPP_URL = os.getenv("WEBAPP_URL", "https://gostsmoke727-stack.github.io/hookah-guest-bot1/").strip()
 
 with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
     ASSORTMENT = [r for r in csv.DictReader(f) if r.get("Бренд") and r.get("Название")]
@@ -721,37 +721,73 @@ def remember_current_mix(session):
     save_memory(session["memory"])
     return mix
 
+def miniapp_url(rows, profile=None):
+    payload = {
+        "variants": [
+            {
+                "brand": r.get("Бренд", ""),
+                "name": r.get("Название", ""),
+                "description": r.get("Описание", ""),
+                "direction": r.get("Направление", ""),
+                "category": r.get("Категория", ""),
+                "strength": r.get("Крепость", ""),
+            }
+            for r in (rows or [])[:3]
+        ],
+        "profile": {
+            "bowl": (profile or {}).get("bowl"),
+            "strength": (profile or {}).get("strength"),
+            "strength_level": (profile or {}).get("strength_level"),
+            "excluded": merge_unique((profile or {}).get("excluded_terms"), (profile or {}).get("allergies")),
+        },
+    }
+    pairing = find_curated_pairing(profile or empty_profile(), rows or [])
+    if pairing:
+        pairing_data, resolved = pairing
+        payload["pairing"] = {
+            "name": pairing_data["name"],
+            "source": pairing_data["source"],
+            "ratios": pairing_data["ratio"],
+            "components": [
+                {
+                    "brand": r.get("Бренд", ""),
+                    "name": r.get("Название", ""),
+                    "strength": r.get("Крепость", ""),
+                    "direction": r.get("Направление", ""),
+                    "category": r.get("Категория", ""),
+                }
+                for r in resolved
+            ],
+        }
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    encoded = urllib.parse.quote(raw, safe="")
+    return WEBAPP_URL.rstrip("/") + "/?data=" + encoded
+
+def miniapp_keyboard(rows, profile=None):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Подробнее", web_app=WebAppInfo(url=miniapp_url(rows, profile)))],
+        [InlineKeyboardButton(text="🔄 Ещё вариант", callback_data="again")],
+    ])
+
 def commands_text():
     return (
-        "<b>📚 Команды бота</b>\n\n"
-        "<b>💬 Общение</b>\nПросто напиши или отправь голосовое — бот поймёт пожелания.\n\n"
-        "<b>🧠 Память</b>\n• <code>запомни</code> — сохранить понравившееся сочетание\n• <code>мой профиль</code> — показать твой вкус\n\n"
-        "<b>🔥 Подбор</b>\n• <code>ещё вариант</code> — другой вариант без повтора\n• <code>подробный состав</code> — рецепт и технология выбранного сочетания\n\n"
-        "<b>⚙️ Сервис</b>\n• <code>меню</code> — открыть меню команд\n• <code>сбросить</code> — начать с чистого листа"
+        "<b>Просто пиши обычным языком.</b>\\n\\n"
+        "🔥 Подбор — по вкусу, крепости и чаше.\\n"
+        "📱 Подробнее — в мини-приложении.\\n"
+        "🧠 Память — бот сохраняет предпочтения.\\n"
+        "Голосовые тоже работают.\\n\\n"
+        "<code>запомни</code>, <code>мой профиль</code>, <code>сбросить</code> — по запросу."
     )
 
 def menu_keyboard(show_mix=False):
-    rows = [
-        [InlineKeyboardButton(text="🔥 Подобрать", callback_data="new"),
-         InlineKeyboardButton(text="📋 Подробный состав", callback_data="details")],
-    ]
-    if show_mix:
-        rows.append([InlineKeyboardButton(text="🎯 Готовое сочетание", callback_data="mix")])
-    rows += [
-        [InlineKeyboardButton(text="🧠 Мой профиль", callback_data="profile"), InlineKeyboardButton(text="💾 Запомнить", callback_data="remember")],
-        [InlineKeyboardButton(text="🔄 Ещё вариант", callback_data="again"), InlineKeyboardButton(text="🧹 Сбросить", callback_data="forget")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 Подобрать", callback_data="new")]
+    ])
 
 def keyboard(rows=None, show_mix=False):
-    buttons=[[InlineKeyboardButton(text="🔥 Подобрать",callback_data="new"),InlineKeyboardButton(text="📋 Все команды",callback_data="menu")]]
     if rows:
-        for i,_ in enumerate(rows[:3]):
-            buttons.append([InlineKeyboardButton(text=f"🥣 Выбрать №{i+1}",callback_data=f"pick:{i}")])
-    if show_mix:
-        buttons.append([InlineKeyboardButton(text="🎯 Собрать сочетание",callback_data="mix")])
-    buttons += [[InlineKeyboardButton(text="🧾 Подробный состав",callback_data="details"),InlineKeyboardButton(text="💾 Запомнить",callback_data="remember")],[InlineKeyboardButton(text="🔄 Ещё вариант",callback_data="again"),InlineKeyboardButton(text="🧠 Профиль",callback_data="profile")],[InlineKeyboardButton(text="🧹 Сбросить память",callback_data="forget")]]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+        return miniapp_keyboard(rows, None)
+    return menu_keyboard()
 
 def profile_text(memory):
     return (
@@ -932,9 +968,9 @@ async def handle_turn(bot, message, user_text):
         return
 
     session["last_mix_rows"] = recs
-    show_mix = bool(find_curated_pairing(prefs, recs))
+    show_mix = False
     result_text = (html.escape(reply[:260]) + "\n\n" if reply else "") + build_result(prefs, recs, session["memory"])
-    await message.answer(result_text, reply_markup=keyboard(recs, show_mix=show_mix))
+    await message.answer(result_text, reply_markup=miniapp_keyboard(recs, prefs))
 
 
 
@@ -1068,7 +1104,7 @@ async def main():
         session["last_mix_rows"] = selected
         await call.answer("Выбрано 👍")
         await send_bowl_photo(call.bot, call.message, session["profile"])
-        await call.message.answer(detailed_recipe_text(selected, session["profile"]), reply_markup=keyboard(selected))
+        await call.message.answer(detailed_recipe_text(selected, session["profile"]), reply_markup=miniapp_keyboard(selected, session["profile"]))
 
     @dp.callback_query(F.data == "mix")
     async def mix_callback(call: CallbackQuery):
@@ -1078,11 +1114,11 @@ async def main():
             await call.message.answer("Сначала сделай подбор.", reply_markup=menu_keyboard()); return
         pairing = find_curated_pairing(session["profile"], session["last_recs"])
         if not pairing:
-            await call.message.answer("Для текущих условий нет проверенного сочетания в ассортименте. Пропорции выдумывать не буду.", reply_markup=keyboard(session["last_recs"]))
+            await call.message.answer("Для текущих условий нет проверенного сочетания в ассортименте. Пропорции выдумывать не буду.", reply_markup=miniapp_keyboard(session["last_recs"], session["profile"]))
             return
         session["last_mix_rows"] = pairing[1]
         await send_bowl_photo(call.bot, call.message, session["profile"])
-        await call.message.answer(build_pairing_text(session["profile"], pairing[1]) + "\n\nНажми «📋 Подробный состав» — там граммы, забивка, жар, замены и теория.", reply_markup=keyboard(pairing[1]))
+        await call.message.answer(build_pairing_text(session["profile"], pairing[1]) + "\n\nНажми «📋 Подробный состав» — там граммы, забивка, жар, замены и теория.", reply_markup=miniapp_keyboard(pairing[1], session["profile"]))
 
     @dp.callback_query(F.data == "profile")
     async def profile_callback(call: CallbackQuery):
@@ -1098,8 +1134,10 @@ async def main():
         if not rows:
             await call.message.answer("Сначала сделай новый подбор — тогда раскрою подробный состав.", reply_markup=menu_keyboard())
             return
-        await send_bowl_photo(call.bot, call.message, session["profile"])
-        await safe_details(call.message, session)
+        await call.message.answer(
+            "Подробности теперь открываются в мини-приложении.",
+            reply_markup=miniapp_keyboard(rows, session["profile"])
+        )
 
     @dp.callback_query(F.data == "remember")
     async def remember_callback(call: CallbackQuery):
@@ -1177,7 +1215,7 @@ async def main():
             await call.answer()
             await call.message.answer(
                 build_result(session["profile"], recs, session["memory"]),
-                reply_markup=keyboard(recs),
+                reply_markup=miniapp_keyboard(recs, session["profile"]),
             )
         else:
             await call.answer("Нужны ещё пожелания", show_alert=True)
@@ -1228,8 +1266,10 @@ async def main():
             if not rows:
                 await message.answer("Сначала сделай новый подбор — тогда раскрою подробный состав.")
                 return
-            await send_bowl_photo(bot, message, session["profile"])
-            await safe_details(message, session)
+            await message.answer(
+                "Открыл подробности в мини-приложении.",
+                reply_markup=miniapp_keyboard(rows, session["profile"])
+            )
             return
 
         if nt in {"мой профиль", "профиль", "profile"}:
