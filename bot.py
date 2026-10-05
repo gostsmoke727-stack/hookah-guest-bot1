@@ -17,7 +17,7 @@ from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, C
 
 BASE = Path(__file__).resolve().parent
 CSV_PATH = BASE / "data" / "assortment.csv"
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").replace("\ufeff", "").strip().strip("\"").strip("'").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
