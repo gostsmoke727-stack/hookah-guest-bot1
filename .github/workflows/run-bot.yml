@@ -34,7 +34,22 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Syntax check
-        run: python -m py_compile bot.py
+        id: syntax
+        run: |
+          python -m py_compile bot.py 2> /tmp/pycompile-error.txt || {
+            cat /tmp/pycompile-error.txt
+            exit 1
+          }
+
+      - name: Publish syntax error for diagnostics
+        if: failure() && steps.syntax.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const error = fs.existsSync('/tmp/pycompile-error.txt') ? fs.readFileSync('/tmp/pycompile-error.txt', 'utf8') : 'No compiler output captured.';
+            const body = 'Temporary CI diagnostic for bot.py syntax check.\n\n```text\n' + error.slice(0, 6000) + '\n```';
+            await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title: 'CI syntax diagnostic', body });
 
       - name: Check Telegram
         env:
