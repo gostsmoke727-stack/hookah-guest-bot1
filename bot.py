@@ -888,145 +888,158 @@ async def show_details(message):
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
+
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
-    await bot.set_my_commands([{"command":"start","description":"Начать подбор"},{"command":"menu","description":"Меню команд"},{"command":"remember","description":"Запомнить сочетание"},{"command":"details","description":"Подробный состав"},{"command":"profile","description":"Мой профиль"},{"command":"again","description":"Ещё вариант"},{"command":"reset","description":"Сбросить память"}])
 
-    # Загружаем Whisper при старте, чтобы первое голосовое не ждало загрузку модели.
-    global _whisper_model
-    if _whisper_model is None:
-        from faster_whisper import WhisperModel
-        _whisper_model = await asyncio.to_thread(
-            WhisperModel, WHISPER_MODEL, device="cpu", compute_type="int8"
-        )
+    await bot.set_my_commands([
+        {"command": "start", "description": "Начать подбор"},
+        {"command": "menu", "description": "Меню команд"},
+        {"command": "remember", "description": "Запомнить сочетание"},
+        {"command": "details", "description": "Подробный состав"},
+        {"command": "profile", "description": "Мой профиль"},
+        {"command": "again", "description": "Ещё вариант"},
+        {"command": "reset", "description": "Сбросить память"},
+    ])
 
     @dp.message(CommandStart())
     async def start(message: Message):
+        memory = load_memory(message.from_user.id, message)
         sessions[message.from_user.id] = {
-            "profile": profile_from_memory(load_memory(message.from_user.id, message)), "history": [],
-            "memory": load_memory(message.from_user.id, message), "turns": 0, "shown": [], "counted": False
+            "profile": profile_from_memory(memory),
+            "history": [],
+            "memory": memory,
+            "turns": 0,
+            "shown": [],
+            "last_mix_rows": [],
+            "counted": False,
         }
         name = html.escape(message.from_user.first_name or "гость")
         await message.answer(
             f"<b>Привет, {name} 👋</b>\n\n"
             "Я запомню твой вкус и со временем буду подбирать точнее.\n"
-            "Скажи просто: чего хочется сегодня?",
-            reply_markup=menu_keyboard()
+            "Скажи просто, чего хочется сегодня.",
+            reply_markup=menu_keyboard(),
         )
-
-    @dp.callback_query(F.data == "menu")
-    async def menu_callback(call: CallbackQuery):
-        await call.answer()
-        await show_menu(call.message)
-
-    @dp.callback_query(F.data == "remember")
-    async def remember_callback(call: CallbackQuery):
-        await call.answer()
-        await remember_last_mix(call.message)
-
-    @dp.callback_query(F.data == "details")
-    async def details_callback(call: CallbackQuery):
-        await call.answer()
-        await show_details(call.message)
 
     @dp.callback_query(F.data == "new")
     async def new_chat(call: CallbackQuery):
+        memory = load_memory(call.from_user.id, call.message)
         sessions[call.from_user.id] = {
-            "profile": profile_from_memory(load_memory(call.from_user.id, call.message)), "history": [],
-            "memory": load_memory(call.from_user.id, call.message), "turns": 0, "shown": [], "counted": False
+            "profile": profile_from_memory(memory),
+            "history": [],
+            "memory": memory,
+            "turns": 0,
+            "shown": [],
+            "last_mix_rows": [],
+            "counted": False,
         }
         await call.answer()
-        await call.message.answer("Окей. Что хочется сегодня? Можно голосом.")
+        await call.message.answer("Окей. Что хочется сегодня? Можно голосом.", reply_markup=menu_keyboard())
 
     @dp.callback_query(F.data == "profile")
-    async def profile(call: CallbackQuery):
+    async def profile_callback(call: CallbackQuery):
         memory = load_memory(call.from_user.id, call.message)
         await call.answer()
-        await call.message.answer(profile_text(memory), reply_markup=keyboard())
+        await call.message.answer(profile_text(memory), reply_markup=menu_keyboard())
 
     @dp.callback_query(F.data == "details")
-    async def details(call: CallbackQuery):
+    async def details_callback(call: CallbackQuery):
         session = sessions.get(call.from_user.id)
         if not session or not session.get("last_mix_rows"):
             await call.answer("Сначала сделай подбор", show_alert=True)
             return
         await call.answer()
-        await call.message.answer(detailed_recipe_text(session["last_mix_rows"], session["profile"]), reply_markup=menu_keyboard())
+        await call.message.answer(
+            detailed_recipe_text(session["last_mix_rows"], session["profile"]),
+            reply_markup=menu_keyboard(),
+        )
 
     @dp.callback_query(F.data == "remember")
-    async def remember(call: CallbackQuery):
+    async def remember_callback(call: CallbackQuery):
         session = sessions.get(call.from_user.id)
         if not session or not session.get("last_mix_rows"):
             await call.answer("Сначала сделай подбор", show_alert=True)
             return
         mix = remember_current_mix(session)
         await call.answer("Запомнил 👍")
-        await call.message.answer("<b>🧠 Запомнил</b>\n" + html.escape(mix["name"]) + "\n" + "\n".join(f"• {x['ratio']} {html.escape(x['brand'])} — {html.escape(x['name'])}" for x in mix["rows"]), reply_markup=menu_keyboard())
+        await call.message.answer(
+            "<b>🧠 Запомнил</b>\n"
+            + html.escape(mix["name"])
+            + "\n"
+            + "\n".join(
+                f"• {x['ratio']} {html.escape(x['brand'])} — {html.escape(x['name'])}"
+                for x in mix["rows"]
+            ),
+            reply_markup=menu_keyboard(),
+        )
+
+    @dp.callback_query(F.data == "forget")
+    async def forget_callback(call: CallbackQuery):
+        memory = empty_memory(call.from_user.id, call.message)
+        save_memory(memory)
+        sessions[call.from_user.id] = {
+            "profile": empty_profile(),
+            "history": [],
+            "memory": memory,
+            "turns": 0,
+            "shown": [],
+            "last_mix_rows": [],
+            "counted": False,
+        }
+        await call.answer("Память сброшена")
+        await call.message.answer("Готово. Начинаем с чистого листа.", reply_markup=menu_keyboard())
+
+    @dp.callback_query(F.data == "again")
+    async def again_callback(call: CallbackQuery):
+        session = sessions.get(call.from_user.id)
+        if not session:
+            memory = load_memory(call.from_user.id, call.message)
+            session = {
+                "profile": profile_from_memory(memory),
+                "history": [],
+                "memory": memory,
+                "turns": 0,
+                "shown": [],
+                "last_mix_rows": [],
+                "counted": False,
+            }
+            sessions[call.from_user.id] = session
+
+        session["turns"] += 1
+        rows = score_candidates(session["profile"], session["memory"])
+        recs = make_recommendations(
+            rows,
+            exclude_names=session.get("shown", []) + list(recent_names(session["memory"])),
+            diversity_offset=session["turns"] * 5,
+        )
+        if not recs:
+            recs = make_recommendations(
+                rows,
+                exclude_names=session.get("shown", []),
+                diversity_offset=session["turns"] * 5,
+            )
+        if not recs:
+            recs = make_recommendations(rows, diversity_offset=session["turns"] * 5)
+
+        if recs:
+            session["last_mix_rows"] = recs
+            session["shown"] = merge_unique(
+                session.get("shown", []),
+                [r["Бренд"] + " — " + r["Название"] for r in recs],
+            )
+            await call.answer()
+            await call.message.answer(
+                build_result(session["profile"], recs, session["memory"]),
+                reply_markup=menu_keyboard(),
+            )
+        else:
+            await call.answer("Нужны ещё пожелания", show_alert=True)
 
     @dp.callback_query(F.data == "menu")
     async def menu_callback(call: CallbackQuery):
         await call.answer()
         await call.message.answer(commands_text(), reply_markup=menu_keyboard())
-
-    @dp.callback_query(F.data == "forget")
-    async def forget(call: CallbackQuery):
-        memory = empty_memory(call.from_user.id, call.message)
-        save_memory(memory)
-        sessions[call.from_user.id] = {
-            "profile": empty_profile(), "history": [],
-            "memory": memory, "turns": 0, "shown": [], "counted": False
-        }
-        await call.answer("Память сброшена")
-        await call.message.answer("Готово. Начинаем с чистого листа.", reply_markup=keyboard())
-
-    @dp.callback_query(F.data == "again")
-    async def again(call: CallbackQuery):
-        session = sessions.get(call.from_user.id)
-        if not session:
-            session = {
-                "profile": empty_profile(), "history": [],
-                "memory": load_memory(call.from_user.id, call.message),
-                "turns": 0, "shown": [], "counted": False
-            }
-        rows = score_candidates(session["profile"], session["memory"])
-        recs = make_recommendations(rows, exclude_names=session.get("shown", []) + list(recent_names(session["memory"])), diversity_offset=session["turns"] * 3 + 1)
-        if not recs:
-            recs = make_recommendations(rows, exclude_names=session.get("shown", []), diversity_offset=session["turns"] * 3 + 1)
-        if not recs:
-            recs = make_recommendations(rows, diversity_offset=session["turns"] * 3 + 1)
-        session["shown"] = merge_unique(session.get("shown"), [r["Бренд"] + " — " + r["Название"] for r in recs])
-        session["last_recs"] = recs
-        await call.answer()
-        if recs:
-            await call.message.answer(build_result(session["profile"], recs, session["memory"]),
-                                      reply_markup=keyboard())
-        else:
-            await call.message.answer("Дай ещё одно пожелание — и я докручу подбор.",
-                                      reply_markup=keyboard())
-
-    @dp.message(Command("menu"))
-    async def menu_command(message: Message):
-        await show_menu(message)
-
-    @dp.message(Command("remember"))
-    async def remember_command(message: Message):
-        await remember_last_mix(message)
-
-    @dp.message(Command("details"))
-    async def details_command(message: Message):
-        await show_details(message)
-
-    @dp.message(Command("profile"))
-    async def profile_command(message: Message):
-        memory = load_memory(message.from_user.id, message)
-        await message.answer(profile_text(memory), reply_markup=keyboard())
-
-    @dp.message(Command("reset"))
-    async def reset_command(message: Message):
-        memory = empty_memory(message.from_user.id, message)
-        save_memory(memory)
-        sessions.pop(message.from_user.id, None)
-        await message.answer("Память очищена.", reply_markup=keyboard())
 
     @dp.message(F.voice)
     async def voice(message: Message):
@@ -1036,44 +1049,73 @@ async def main():
         else:
             await message.answer("Не разобрал голосовое. Попробуй ещё раз или напиши текстом.")
 
-    @dp.message(F.text, lambda m: norm(m.text).strip("/") in {"меню", "menu", "команды"})
-    async def menu_text(message: Message):
-        await message.answer(commands_text(), reply_markup=menu_keyboard())
-
-    @dp.message(F.text, lambda m: norm(m.text).strip("/") in {"запомни", "запомнить"})
-    async def remember_text(message: Message):
-        session = sessions.get(message.from_user.id)
-        if not session or not session.get("last_mix_rows"):
-            await message.answer("Сначала сделай подбор, а потом напиши «запомни».")
-            return
-        mix = remember_current_mix(session)
-        await message.answer("<b>🧠 Запомнил</b>\n" + html.escape(mix["name"]) + "\n" + "\n".join(f"• {x['ratio']} {html.escape(x['brand'])} — {html.escape(x['name'])}" for x in mix["rows"]), reply_markup=menu_keyboard())
-
-    @dp.message(F.text, lambda m: norm(m.text).strip("/") in {"подробный состав", "состав", "рецепт"})
-    async def details_text(message: Message):
-        session = sessions.get(message.from_user.id)
-        if not session or not session.get("last_mix_rows"):
-            await message.answer("Сначала сделай подбор, а потом запроси подробный состав.")
-            return
-        await message.answer(detailed_recipe_text(session["last_mix_rows"], session["profile"]), reply_markup=menu_keyboard())
-
     @dp.message(F.text)
     async def text_message(message: Message):
         text = (message.text or "").strip()
-        nt = norm(text)
-        if nt in {"запомни", "запомни это", "запомнить", "сохрани", "сохрани это"}:
-            await remember_last_mix(message)
+        nt = norm(text).lstrip("/")
+
+        if nt in {"меню", "menu", "команды", "команды бота"}:
+            await message.answer(commands_text(), reply_markup=menu_keyboard())
             return
-        if nt in {"подробный состав", "подробно", "состав", "рецепт"}:
-            await show_details(message)
+
+        if nt in {"запомни", "запомнить", "remember"}:
+            session = sessions.get(message.from_user.id)
+            if not session or not session.get("last_mix_rows"):
+                await message.answer("Сначала сделай подбор, а потом напиши «запомни».")
+                return
+            mix = remember_current_mix(session)
+            await message.answer(
+                "<b>🧠 Запомнил</b>\n"
+                + html.escape(mix["name"])
+                + "\n"
+                + "\n".join(
+                    f"• {x['ratio']} {html.escape(x['brand'])} — {html.escape(x['name'])}"
+                    for x in mix["rows"]
+                ),
+                reply_markup=menu_keyboard(),
+            )
             return
-        if nt in {"меню", "команды", "команды бота"}:
-            await show_menu(message)
+
+        if nt in {"подробный состав", "подробно", "состав", "рецепт", "details"}:
+            session = sessions.get(message.from_user.id)
+            if not session or not session.get("last_mix_rows"):
+                await message.answer("Сначала сделай подбор, а потом запроси подробный состав.")
+                return
+            await message.answer(
+                detailed_recipe_text(session["last_mix_rows"], session["profile"]),
+                reply_markup=menu_keyboard(),
+            )
             return
+
+        if nt in {"мой профиль", "профиль", "profile"}:
+            memory = load_memory(message.from_user.id, message)
+            await message.answer(profile_text(memory), reply_markup=menu_keyboard())
+            return
+
+        if nt in {"ещё вариант", "еще вариант", "again"}:
+            await message.answer("Нажми «🔄 Ещё вариант» под последним подбором.", reply_markup=menu_keyboard())
+            return
+
+        if nt in {"сбросить", "reset", "забыть"}:
+            memory = empty_memory(message.from_user.id, message)
+            save_memory(memory)
+            sessions[message.from_user.id] = {
+                "profile": empty_profile(),
+                "history": [],
+                "memory": memory,
+                "turns": 0,
+                "shown": [],
+                "last_mix_rows": [],
+                "counted": False,
+            }
+            await message.answer("Готово. Начинаем с чистого листа.", reply_markup=menu_keyboard())
+            return
+
         if text:
             await handle_turn(bot, message, text)
 
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
