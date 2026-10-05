@@ -1,0 +1,29 @@
+name: Extract ZIP sources
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    if: ${{ !contains(github.event.head_commit.message, 'Extract ZIP sources') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract
+        run: |
+          mkdir -p /tmp/extract
+          unzip -o hookah-guest-bot1.zip -d /tmp/extract
+          cp -R /tmp/extract/hookah-guest-bot1/. .
+          rm -rf /tmp/extract
+          rm -f .github/workflows/extract.yml
+      - name: Commit extracted sources
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Extract ZIP sources" || exit 0
+          git push
