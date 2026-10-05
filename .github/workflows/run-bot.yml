@@ -33,8 +33,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets['OPENROUTER_API_KEY'] }}
           SUPABASE_URL: ${{ secrets['SUPABASE_URL'] }}
           SUPABASE_KEY: ${{ secrets['SUPABASE_KEY'] }}
-          OPENROUTER_MODEL: openai/gpt-5.6-sol
-          OPENROUTER_STT_MODEL: openai/whisper-large-v3-turbo
+          OPENROUTER_MODEL: openrouter/free
         run: |
           test -n "$BOT_TOKEN" || { echo "BOT_TOKEN secret is not configured"; exit 1; }
           python -m py_compile bot.py
