@@ -831,6 +831,7 @@ async def handle_turn(bot, message, user_text):
         session.get("shown", []),
         [r["Бренд"] + " — " + r["Название"] for r in recs]
     )
+    session["last_mix_rows"] = recs
     session["last_recs"] = recs
     session["history"] += [
         {"role": "user", "text": user_text},
