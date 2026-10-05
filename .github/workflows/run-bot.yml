@@ -33,8 +33,8 @@ jobs:
       - name: Start bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          GEMINI_API_KEY: ${{ secrets['GEMINI_API_KEY'] }}
-          GEMINI_MODEL: gemini-2.5-flash-lite
+          OPENROUTER_API_KEY: ${{ secrets['OPENROUTER_API_KEY'] }}
+          OPENROUTER_MODEL: openrouter/free
           WHISPER_MODEL: tiny
         run: |
           test -n "$BOT_TOKEN" || { echo "BOT_TOKEN secret is not configured"; exit 1; }
