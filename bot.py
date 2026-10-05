@@ -758,7 +758,7 @@ async def handle_turn(bot, message, user_text):
         "profile": profile_from_memory(load_memory(message.from_user.id, message)),
         "history": [],
         "memory": load_memory(message.from_user.id, message),
-        "turns": 0, "shown": [], "last_recs": [], "counted": False
+        "turns": 0, "shown": [], "last_recs": [], "last_mix_rows": [], "counted": False
     })
     session["turns"] += 1
 
@@ -843,6 +843,8 @@ async def handle_turn(bot, message, user_text):
         x in norm(user_text)
         for x in ("микс", "сочетание", "рецепт", "пропорци")
     )
+    pairing = find_curated_pairing(prefs, ASSORTMENT) if wants_mix else None
+    session["last_mix_rows"] = pairing[1] if pairing else []
     pairing_text = build_pairing_text(prefs, ASSORTMENT) if wants_mix else ""
     result_text = build_result(prefs, recs, session["memory"], pairing_text)
     if reply:
@@ -868,7 +870,7 @@ async def remember_last_mix(message):
     if not session or not session.get("last_recs"):
         await message.answer("Сначала сделай подбор и выбери понравившийся вариант.", reply_markup=keyboard())
         return
-    recs = session["last_recs"]
+    recs = session.get("last_mix_rows") or session["last_recs"]
     pairing = resolve_pairing_for_rows(recs)
     mix = favorite_mix_from_rows(recs, pairing[0]["source"] if pairing else "подбор бота")
     memory = session["memory"]
@@ -884,7 +886,23 @@ async def show_details(message):
     if not session or not session.get("last_recs"):
         await message.answer("Сначала сделай подбор — тогда я смогу раскрыть конкретный состав.", reply_markup=keyboard())
         return
-    await message.answer(detailed_pairing_text(session["profile"], session["last_recs"]), reply_markup=keyboard())
+    rows = session.get("last_mix_rows") or session["last_recs"]
+    if not session.get("last_mix_rows"):
+        candidate = find_curated_pairing(session["profile"], ASSORTMENT)
+        if candidate:
+            rows = candidate[1]
+    await message.answer(detailed_pairing_text(session["profile"], rows), reply_markup=keyboard())
+
+async def show_favorites(message):
+    memory = load_memory(message.from_user.id, message)
+    mixes = memory.get("favorite_mixes") or []
+    if not mixes:
+        await message.answer("💾 Сохранённых сочетаний пока нет.", reply_markup=keyboard())
+        return
+    lines = ["<b>💾 Сохранённые сочетания</b>", ""]
+    for i, mix in enumerate(reversed(mixes[-10:]), 1):
+        lines.append(f"<b>{i}.</b> {html.escape(mix.get('name',''))}")
+    await message.answer("\n".join(lines), reply_markup=keyboard())
 
 async def main():
     if not BOT_TOKEN:
