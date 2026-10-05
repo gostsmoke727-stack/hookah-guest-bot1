@@ -10,6 +10,7 @@ import re
 import tempfile
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
