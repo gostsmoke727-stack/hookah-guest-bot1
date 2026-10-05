@@ -64,7 +64,9 @@ AI_SYSTEM = """
 - Новое явное пожелание важнее старого.
 - "воздух", "детский", "максимально лёгкий" = 1/10.
 - "лёгкий" = 2–3/10; "средний" = 4–6/10; "крепкий" = 7–9/10; "очень крепкий", "убойный" = 10/10.
-- Если названо число 1–10, сохрани его в strength_level.
+- Если названа крепость диапазоном (например, «5–6»), сохрани среднее значение (для 5–6 это 6) в strength_level и сам диапазон в strength.
+- «чайное», «чайный», «чай» = вкусовая ось «чай».
+- «тропическое», «тропический», «тропики» = вкусовая ось «тропики».
 - "классика" = классическая чаша.
 - "ягоды с тропиками" = две положительные оси одновременно.
 - Рецепт показывай только при прямом запросе на микс/сочетание/рецепт/пропорции.
@@ -288,6 +290,7 @@ def term_matches(row, term):
         "свежее": ["свеж", "мята", "холод", "ice", "ментол"],
         "сладкое": ["слад", "десерт", "ванил", "крем", "сахар"],
         "кислое": ["кисл", "цитрус", "лимон", "лайм"],
+        "чай": ["чай", "tea", "assam", "bergamot", "bergamonstr"],
     }
     needles = aliases.get(t, [t])
     return any(any(n in field for n in needles) for field in fields)
@@ -298,6 +301,10 @@ def strength_to_level(value):
     if isinstance(value, (int, float)):
         return max(1, min(10, int(value)))
     t = norm(value)
+    range_match = re.search(r"(?<!\d)(10|[1-9])\s*[-–—]\s*(10|[1-9])(?!\d)", t)
+    if range_match:
+        a, b = int(range_match.group(1)), int(range_match.group(2))
+        return max(1, min(10, round((a + b) / 2)))
     m = re.search(r"(?<!\d)(10|[1-9])(?!\d)", t)
     if m:
         return int(m.group(1))
@@ -625,7 +632,12 @@ def build_result(profile, rows, memory, pairing_text=""):
 def local_profile_from_text(text):
     t = norm(text)
     p = empty_profile()
-    p["desired_terms"] = [x for x in ["ягоды", "тропики", "сладкое", "кислое", "свежее", "цитрус"] if x in t]
+    p["desired_terms"] = []
+    if "ягод" in t: p["desired_terms"].append("ягоды")
+    if "тропик" in t: p["desired_terms"].append("тропики")
+    if "чай" in t: p["desired_terms"].append("чай")
+    for axis in ("сладкое", "кислое", "свежее", "цитрус"):
+        if axis in t: p["desired_terms"].append(axis)
     for match in re.finditer(r"(?:не хочу|не люблю|без|не надо|аллергия на)\s+([^.!?\n]+)", t):
         for token in re.split(r"[,;]+|\s+и\s+", match.group(1)):
             token = token.strip()
@@ -779,6 +791,36 @@ async def transcribe_voice(bot, message):
         except OSError:
             pass
 
+
+async def restore_session_for_user(message):
+    session = sessions.get(message.from_user.id)
+    if session:
+        return session
+    memory = load_memory(message.from_user.id, message)
+    rows = []
+    for saved in memory.get("last_hookahs", []) or []:
+        if " — " in str(saved):
+            brand, name = str(saved).split(" — ", 1)
+            found = next((r for r in ASSORTMENT if norm(r.get("Бренд")) == norm(brand) and norm(r.get("Название")) == norm(name)), None)
+            if found:
+                rows.append(found)
+    session = {
+        "profile": profile_from_memory(memory), "history": [], "memory": memory,
+        "turns": 0, "shown": [], "last_recs": rows[:3], "last_mix_rows": rows[:3], "counted": False
+    }
+    sessions[message.from_user.id] = session
+    return session
+
+async def safe_details(message, session):
+    rows = session.get("last_mix_rows") or session.get("last_recs") or []
+    if not rows:
+        await message.answer("Не нашёл последний подбор. Сделай новый подбор — после этого подробный состав будет доступен.", reply_markup=menu_keyboard())
+        return
+    try:
+        result = detailed_recipe_text(rows, session.get("profile") or empty_profile())
+    except Exception:
+        result = "Не удалось раскрыть состав этого подбора. Сделай новый подбор — я пересоберу его корректно."
+    await message.answer(result, reply_markup=menu_keyboard())
 
 async def handle_turn(bot, message, user_text):
     session = sessions.setdefault(message.from_user.id, {
@@ -1050,16 +1092,14 @@ async def main():
 
     @dp.callback_query(F.data == "details")
     async def details_callback(call: CallbackQuery):
-        session = sessions.get(call.from_user.id)
-        if not session or not session.get("last_mix_rows"):
-            await call.answer("Сначала сделай подбор", show_alert=True)
-            return
         await call.answer()
+        session = await restore_session_for_user(call.message)
+        rows = session.get("last_mix_rows") or session.get("last_recs") or []
+        if not rows:
+            await call.message.answer("Сначала сделай новый подбор — тогда раскрою подробный состав.", reply_markup=menu_keyboard())
+            return
         await send_bowl_photo(call.bot, call.message, session["profile"])
-        await call.message.answer(
-            detailed_recipe_text(session["last_mix_rows"], session["profile"]),
-            reply_markup=menu_keyboard(),
-        )
+        await safe_details(call.message, session)
 
     @dp.callback_query(F.data == "remember")
     async def remember_callback(call: CallbackQuery):
@@ -1183,15 +1223,13 @@ async def main():
             return
 
         if nt in {"подробный состав", "подробно", "состав", "рецепт", "details"}:
-            session = sessions.get(message.from_user.id)
-            if not session or not session.get("last_mix_rows"):
-                await message.answer("Сначала сделай подбор, а потом запроси подробный состав.")
+            session = await restore_session_for_user(message)
+            rows = session.get("last_mix_rows") or session.get("last_recs") or []
+            if not rows:
+                await message.answer("Сначала сделай новый подбор — тогда раскрою подробный состав.")
                 return
             await send_bowl_photo(bot, message, session["profile"])
-            await message.answer(
-                detailed_recipe_text(session["last_mix_rows"], session["profile"]),
-                reply_markup=menu_keyboard(),
-            )
+            await safe_details(message, session)
             return
 
         if nt in {"мой профиль", "профиль", "profile"}:
