@@ -1187,7 +1187,7 @@ async def main():
         )
 
     @dp.callback_query(F.data == "new")
-    async def new_chat(call: CallbackQuery):
+    async def new_callback(call: CallbackQuery):
         memory = load_memory(call.from_user.id, call.message)
         sessions[call.from_user.id] = {
             "profile": profile_from_memory(memory),
@@ -1199,7 +1199,7 @@ async def main():
             "counted": False,
         }
         await call.answer()
-        await call.message.answer("Окей. Что хочется сегодня? Можно голосом.", reply_markup=menu_keyboard())
+        await call.message.answer("Расскажи, что хочешь покурить — вкус, крепость, чашу.", reply_markup=menu_keyboard())
 
     @dp.callback_query(F.data.startswith("pick:"))
     async def pick_callback(call: CallbackQuery):
