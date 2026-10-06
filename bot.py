@@ -195,17 +195,19 @@ def supabase_request(method, path, body=None, params=""):
 
     return None
 
-def should_count_visit(memory, hours=6):
-    last_seen = str(memory.get("last_seen") or "").strip()
+NEW_VISIT_GAP_HOURS = 4
+
+def is_new_visit(memory):
+    last_seen = memory.get("last_seen")
     if not last_seen:
         return True
     try:
-        last = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        return datetime.now(timezone.utc) - last >= timedelta(hours=hours)
-    except (TypeError, ValueError):
+        last_dt = datetime.fromisoformat(str(last_seen).replace("Z", "+00:00"))
+    except Exception:
         return True
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last_dt).total_seconds() > NEW_VISIT_GAP_HOURS * 3600
 
 
 def load_memory(user_id, message):
@@ -723,13 +725,12 @@ def local_profile_from_text(text):
     for axis in ("сладкое", "кислое", "свежее", "цитрус"):
         if axis in t: p["desired_terms"].append(axis)
 
-    exclusion_pattern = r"(?:не хочу|не люблю|без|не надо|аллергия на)\s+(.+?)(?=(?:\s+(?:хочу|желательно|предпочитаю|буду|люблю|нравится)\b|[.!?\n]|$))"
-    for match in re.finditer(exclusion_pattern, t):
+    for match in re.finditer(r"(?:не хочу|не люблю|без|не надо|аллергия на)\s+([^.!?\n]+)", t):
         for token in re.split(r"[,;]+|\s+и\s+", match.group(1)):
-            token = token.strip(" ,;")
+            token = token.strip()
             if not token or token in {"табак", "вкус", "вкусы", "кальян"}:
                 continue
-            if "хочу" in token or "желательно" in token:
+            if "хочу" in token:
                 break
             if len(token) > 2:
                 p["excluded_terms"].append(canonical_term(token))
@@ -812,26 +813,39 @@ def remember_current_mix(session):
     return mix
 
 def miniapp_url(rows, profile=None):
+    profile = profile or {}
+    variants = []
+    for r in (rows or [])[:3]:
+        substitute = find_substitute(r)
+        if isinstance(substitute, dict):
+            substitutes = [{
+                "from": f'{r.get("Бренд", "")} — {r.get("Название", "")}',
+                "to": f'{substitute.get("Бренд", "")} — {substitute.get("Название", "")}',
+            }]
+        elif isinstance(substitute, (list, tuple)) and len(substitute) >= 2 and isinstance(substitute[0], str):
+            substitutes = [{"from": substitute[0], "to": substitute[1]}]
+        else:
+            substitutes = []
+
+        variants.append({
+            "brand": r.get("Бренд", ""),
+            "name": r.get("Название", ""),
+            "category": r.get("Категория", ""),
+            "strength": r.get("Крепость", ""),
+            "direction": r.get("Направление", ""),
+            "description": r.get("Описание", ""),
+            "substitutes": substitutes,
+        })
+
     payload = {
-        "variants": [
-            {
-                "brand": r.get("Бренд", ""),
-                "name": r.get("Название", ""),
-                "description": r.get("Описание", ""),
-                "direction": r.get("Направление", ""),
-                "category": r.get("Категория", ""),
-                "strength": r.get("Крепость", ""),
-            }
-            for r in (rows or [])[:3]
-        ],
+        "variants": variants,
         "profile": {
-            "bowl": (profile or {}).get("bowl"),
-            "strength": (profile or {}).get("strength"),
-            "strength_level": (profile or {}).get("strength_level"),
-            "excluded": merge_unique((profile or {}).get("excluded_terms"), (profile or {}).get("allergies")),
+            "bowl": profile.get("bowl") or profile.get("usual_bowl") or "",
+            "excluded": profile.get("excluded_terms", []),
         },
     }
-    pairing = find_curated_pairing(profile or empty_profile(), rows or [])
+
+    pairing = find_curated_pairing(profile, rows or [])
     if pairing:
         pairing_data, resolved = pairing
         payload["pairing"] = {
@@ -849,6 +863,7 @@ def miniapp_url(rows, profile=None):
                 for r in resolved
             ],
         }
+
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     encoded = urllib.parse.quote(raw, safe="")
     url = WEBAPP_URL.rstrip("/") + "/?data=" + encoded
@@ -935,7 +950,7 @@ async def restore_session_for_user(message):
                 rows.append(found)
     session = {
         "profile": profile_from_memory(memory), "history": [], "memory": memory,
-        "turns": 0, "shown": [], "last_recs": rows[:3], "last_mix_rows": rows[:3], "counted": False
+        "turns": 0, "shown": [], "last_recs": rows[:3], "last_mix_rows": rows[:3]
     }
     sessions[message.from_user.id] = session
     return session
@@ -1027,7 +1042,7 @@ async def handle_turn(bot, message, user_text):
     update_memory(
         session["memory"], ai or {}, prefs,
         recommendations=recs,
-        increment_visit=should_count_visit(session["memory"])
+        increment_visit=is_new_visit(session["memory"])
     )
 
     session["shown"] = merge_unique(
