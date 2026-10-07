@@ -3,6 +3,7 @@ services:
     name: hookah-guest-bot1
     runtime: python
     plan: free
+    autoDeployTrigger: off
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     healthCheckPath: /
