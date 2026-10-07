@@ -25,6 +25,13 @@ jobs:
           test -n "${RENDER_API_KEY}" || { echo "RENDER_API_KEY is missing"; exit 1; }
           test -n "${BOT_TOKEN}" || { echo "BOT_TOKEN is missing"; exit 1; }
 
+          echo "Suspending legacy hookah-guest-bot service to prevent Telegram polling conflict..."
+          curl --fail --silent --show-error --request POST \
+            --url "https://api.render.com/v1/services/srv-db16kp9srm7s73ab26m0/suspend" \
+            --header "Authorization: Bearer ${RENDER_API_KEY}" \
+            --header "accept: application/json" \
+            >/dev/null || true
+
           echo "Disabling Render auto-deploy to prevent duplicate deploys..."
           curl --fail --silent --show-error --request PATCH \
             --url "${API}" \
