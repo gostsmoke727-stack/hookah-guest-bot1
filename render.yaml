@@ -1,9 +1,11 @@
 services:
-  - type: worker
+  - type: web
     name: hookah-guest-bot1
     runtime: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    healthCheckPath: /
     envVars:
       - key: BOT_TOKEN
         sync: false
