@@ -25,6 +25,15 @@ jobs:
           test -n "${RENDER_API_KEY}" || { echo "RENDER_API_KEY is missing"; exit 1; }
           test -n "${BOT_TOKEN}" || { echo "BOT_TOKEN is missing"; exit 1; }
 
+          echo "Disabling Render auto-deploy to prevent duplicate deploys..."
+          curl --fail --silent --show-error --request PATCH \
+            --url "${API}" \
+            --header "Authorization: Bearer ${RENDER_API_KEY}" \
+            --header "accept: application/json" \
+            --header "content-type: application/json" \
+            --data '{"autoDeployTrigger":"off"}' \
+            >/dev/null
+
           put_env() {
             local key="$1"
             local value="$2"
@@ -52,6 +61,22 @@ jobs:
             --header "content-type: application/json" \
             --data '{"healthCheckPath":"/"}' \
             >/dev/null
+
+          echo "Cancelling stale Render deploys..."
+          curl --fail --silent --show-error \
+            --url "${API}/deploys?limit=20" \
+            --header "Authorization: Bearer ${RENDER_API_KEY}" \
+            --header "accept: application/json" \
+            | jq -r '.[] | .deploy | select(.status == "queued" or .status == "build_in_progress" or .status == "update_in_progress" or .status == "pre_deploy_in_progress") | .id' \
+            | while read -r deploy_id; do
+                [ -z "${deploy_id}" ] && continue
+                echo "Cancelling ${deploy_id}"
+                curl --fail --silent --show-error --request POST \
+                  --url "${API}/deploys/${deploy_id}/cancel" \
+                  --header "Authorization: Bearer ${RENDER_API_KEY}" \
+                  --header "accept: application/json" \
+                  >/dev/null || true
+              done
 
           echo "Starting Render deploy..."
           curl --fail --silent --show-error --request POST \
