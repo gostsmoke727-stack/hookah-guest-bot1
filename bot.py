@@ -810,7 +810,7 @@ def local_profile_from_text(text):
     p["desired_terms"] = []
     if re.search(r"ягод\w*|клубник\w*|малин\w*|черник\w*|смородин\w*|брусник\w*", t):
         p["desired_terms"].append("ягоды")
-    if re.search(r"тропик\w*|манго\w*|личи\w*|гуав\w*", t):
+    if re.search(r"тропик\w*|тропичес\w*|манго\w*|личи\w*|гуав\w*", t):
         p["desired_terms"].append("тропики")
     if re.search(r"чай\w*|чайный|чайное|ассам|бергамот", t):
         p["desired_terms"].append("чай")
