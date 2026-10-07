@@ -31,7 +31,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://cdn.jsdelivr.net/gh/gostsmoke727-stack/hookah-guest-bot1@main/webapp/index.html").strip()
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://hookah-guest-bot1.onrender.com/webapp/index.html").strip()
 
 logger = logging.getLogger("hookah_bot")
 
@@ -42,18 +42,30 @@ def start_health_server():
         port = 10000
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            body = b'{"status":"ok","service":"hookah-guest-bot1"}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+        def _send(self, body, content_type, status=200):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(body)
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def do_GET(self):
+            path = urllib.parse.urlparse(self.path).path
+            if path in {"/webapp", "/webapp/"}:
+                path = "/webapp/index.html"
+            if path == "/webapp/index.html":
+                try:
+                    body = (BASE / "webapp" / "index.html").read_bytes()
+                    self._send(body, "text/html; charset=utf-8")
+                except OSError:
+                    self._send(b"Mini App file is unavailable", "text/plain; charset=utf-8", 500)
+                return
+            self._send(b'{"status":"ok","service":"hookah-guest-bot1"}', "application/json; charset=utf-8")
 
         def do_HEAD(self):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
+            self.do_GET()
 
         def log_message(self, format, *args):
             return
@@ -336,7 +348,18 @@ async def ai_understand(session, user_text):
 
 def canonical_term(term):
     t = norm(term)
-    aliases = {"маракую":"маракуйя","маракуя":"маракуйя","пассифлору":"пассифлора","трофимов":"trofimoff's","трофимоф":"trofimoff's","trofimoff":"trofimoff's"}
+    aliases = {
+        "маракую":"маракуйя","маракуя":"маракуйя","пассифлору":"пассифлора",
+        "трофимов":"trofimoff's","трофимоф":"trofimoff's","trofimoff":"trofimoff's",
+        "ягодка":"ягоды","ягодки":"ягоды","ягодный":"ягоды","ягодное":"ягоды",
+        "тропический":"тропики","тропическое":"тропики","тропики":"тропики",
+        "чайный":"чай","чайное":"чай","чайные":"чай",
+        "цитрусовый":"цитрус","цитрусовое":"цитрус",
+        "свежий":"свежее","свежая":"свежее","свежее":"свежее",
+        "сладкий":"сладкое","сладкая":"сладкое","сладкое":"сладкое",
+        "кислый":"кислое","кислая":"кислое","кислое":"кислое",
+        "классика":"классическая","классическую":"классическая","классической":"классическая",
+    }
     return aliases.get(t, t)
 
 def term_matches(row, term):
@@ -746,15 +769,59 @@ def build_result(profile, rows, memory, pairing_text=""):
     return "\n".join(lines)
 
 
+
+def detect_feedback(text, session):
+    t = norm(text)
+    positive = any(x in t for x in (
+        "мне понрав", "понравилось", "понравился", "понравилась",
+        "зашло", "зашел", "зашла", "кайф", "огонь", "топ",
+        "бомба", "классный вариант", "классный", "оставь этот",
+        "беру этот", "беру", "оставляем", "оставь", "мне зашло",
+    ))
+    negative = any(x in t for x in (
+        "не понрав", "не зашло", "не зашел", "не зашла",
+        "не моё", "не мое", "мимо", "не хочу такой", "не хочу это",
+        "не нравится", "не понравился", "не понравилась",
+    ))
+    if not positive and not negative:
+        return None
+    rows = session.get("last_recs") or session.get("last_mix_rows") or []
+    selected = rows
+    ordinal = re.search(r"(?:вариант|номер|№)\s*([1-3])", t)
+    if ordinal:
+        idx = int(ordinal.group(1)) - 1
+        selected = rows[idx:idx+1] if 0 <= idx < len(rows) else rows
+    if negative:
+        specific = re.sub(
+            r"^(?:мне\s+)?не\s+(?:понравилось|понравился|понравилась|зашло|нравится)\s*",
+            "", t
+        ).strip()
+        if specific and specific not in {"это", "такое", "этот вариант", "эта чаша"}:
+            return {"kind":"negative_specific", "text":specific, "rows":selected}
+        if selected:
+            return {"kind":"negative", "rows":selected}
+    if positive and selected:
+        return {"kind":"positive", "rows":selected}
+    return {"kind":"positive" if positive else "negative", "rows":selected}
+
 def local_profile_from_text(text):
     t = norm(text)
     p = empty_profile()
     p["desired_terms"] = []
-    if "ягод" in t: p["desired_terms"].append("ягоды")
-    if "тропик" in t or "тропичес" in t: p["desired_terms"].append("тропики")
-    if "чай" in t: p["desired_terms"].append("чай")
-    for axis in ("сладкое", "кислое", "свежее", "цитрус"):
-        if axis in t: p["desired_terms"].append(axis)
+    if re.search(r"ягод\w*|клубник\w*|малин\w*|черник\w*|смородин\w*|брусник\w*", t):
+        p["desired_terms"].append("ягоды")
+    if re.search(r"тропик\w*|манго\w*|личи\w*|гуав\w*", t):
+        p["desired_terms"].append("тропики")
+    if re.search(r"чай\w*|чайный|чайное|ассам|бергамот", t):
+        p["desired_terms"].append("чай")
+    if re.search(r"цитрус\w*|лимон\w*|лайм\w*|апельсин\w*|грейпфрут\w*|мандарин\w*|помело", t):
+        p["desired_terms"].append("цитрус")
+    if re.search(r"слад\w*|десерт\w*", t):
+        p["desired_terms"].append("сладкое")
+    if re.search(r"кисл\w*", t):
+        p["desired_terms"].append("кислое")
+    if re.search(r"свеж\w*|холод\w*|мят\w*|лед\w*|лёд\w*", t):
+        p["desired_terms"].append("свежее")
 
     for match in re.finditer(r"(?:не хочу|не люблю|без|не надо|аллергия на)\s+([^.!?\n]+)", t):
         for token in re.split(r"[,;]+|\s+и\s+", match.group(1)):
@@ -897,7 +964,7 @@ def miniapp_url(rows, profile=None):
 
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     encoded = urllib.parse.quote(raw, safe="")
-    url = WEBAPP_URL.rstrip("/") + "/?data=" + encoded
+    url = WEBAPP_URL.rstrip("/") + "?data=" + encoded
     if len(url) > 1800:
         logger.warning("Mini App URL длиной %s символов — риск обрезки в некоторых клиентах", len(url))
     return url
@@ -942,7 +1009,7 @@ def _get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
         from faster_whisper import WhisperModel
-        model_name = os.getenv("WHISPER_MODEL", "base")
+        model_name = os.getenv("WHISPER_MODEL", "base") or "base"
         _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
     return _whisper_model
 
@@ -958,7 +1025,8 @@ async def transcribe_voice(bot, message):
     try:
         await bot.download(tg_file, destination=path)
         return await asyncio.to_thread(_transcribe_local, path)
-    except Exception:
+    except Exception as e:
+        logger.exception("Voice transcription failed: %s", e)
         return ""
     finally:
         try:
@@ -1005,6 +1073,41 @@ async def handle_turn(bot, message, user_text):
         "turns": 0, "shown": [], "last_recs": [], "last_mix_rows": [], "counted": False
     })
     session["turns"] += 1
+
+    feedback = detect_feedback(user_text, session)
+    if feedback:
+        rows = feedback.get("rows") or []
+        if feedback["kind"] == "positive":
+            labels = [r["Бренд"] + " — " + r["Название"] for r in rows[:3]]
+            session["memory"]["likes"] = merge_unique(session["memory"].get("likes"), labels)
+            session["memory"]["favorite_flavors"] = merge_unique(session["memory"].get("favorite_flavors"), labels)
+            save_memory(session["memory"])
+            if rows:
+                chosen = rows[0]
+                await message.answer(
+                    "Запомнил 👍 " + html.escape(chosen["Бренд"] + " — " + chosen["Название"]) +
+                    ". В следующий раз буду учитывать это как понравившийся вариант.",
+                    reply_markup=miniapp_keyboard(rows[:3], session["profile"]),
+                )
+            else:
+                await message.answer("Запомнил 👍 Буду учитывать, что тебе это понравилось.")
+            session["history"] += [{"role":"user","text":user_text},{"role":"assistant","text":"positive feedback"}]
+            return
+        if feedback["kind"] == "negative_specific":
+            term = canonical_term(feedback.get("text",""))
+            session["profile"]["excluded_terms"] = merge_unique(session["profile"].get("excluded_terms"), [term])
+            session["memory"]["dislikes"] = merge_unique(session["memory"].get("dislikes"), [term])
+            save_memory(session["memory"])
+            await message.answer("Понял. Убираю из следующих подборов: " + html.escape(term) + ".")
+            session["history"] += [{"role":"user","text":user_text},{"role":"assistant","text":"negative specific feedback"}]
+            return
+        if feedback["kind"] == "negative":
+            labels = [r["Бренд"] + " — " + r["Название"] for r in rows[:3]]
+            session["memory"]["dislikes"] = merge_unique(session["memory"].get("dislikes"), labels)
+            save_memory(session["memory"])
+            await message.answer("Понял. Этот вариант больше не буду предлагать. Скажи, что именно не зашло — вкус, крепость или чаша.")
+            session["history"] += [{"role":"user","text":user_text},{"role":"assistant","text":"negative feedback"}]
+            return
 
     ai = await ai_understand(session, user_text)
     if ai:
