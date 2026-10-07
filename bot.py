@@ -8,6 +8,8 @@ import math
 import os
 import re
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -32,6 +34,35 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://cdn.jsdelivr.net/gh/gostsmoke727-stack/hookah-guest-bot1@main/webapp/index.html").strip()
 
 logger = logging.getLogger("hookah_bot")
+
+def start_health_server():
+    try:
+        port = int(os.getenv("PORT", "10000"))
+    except ValueError:
+        port = 10000
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"status":"ok","service":"hookah-guest-bot1"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_HEAD(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, name="render-health", daemon=True)
+    thread.start()
+    print(f"Health server listening on 0.0.0.0:{port}", flush=True)
+
 
 with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as f:
     ASSORTMENT = [r for r in csv.DictReader(f) if r.get("Бренд") and r.get("Название")]
@@ -1153,6 +1184,7 @@ async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
 
+    start_health_server()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
