@@ -1,4 +1,4 @@
-name: Provision Render Worker
+name: Configure Render deployment
 
 on:
   push:
@@ -6,14 +6,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  provision:
+  configure:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Install Render CLI
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/render-oss/cli/refs/heads/main/bin/install.sh | sh
-
-      - name: Create Render background worker
+      - name: Configure Render service
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -22,41 +19,44 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           set -euo pipefail
-          render workspace set tea-db15t6ugekts73cbrjhg
+          SERVICE_ID="srv-db204puk1f9s738k2pj0"
+          API="https://api.render.com/v1/services/${SERVICE_ID}"
 
-          if render services --output json | grep -q '"name":"hookah-guest-bot1-worker"'; then
-            echo "Worker already exists."
-            exit 0
-          fi
+          test -n "${RENDER_API_KEY}" || { echo "RENDER_API_KEY is missing"; exit 1; }
+          test -n "${BOT_TOKEN}" || { echo "BOT_TOKEN is missing"; exit 1; }
 
-          args=(
-            --name hookah-guest-bot1-worker
-            --type background_worker
-            --repo https://github.com/gostsmoke727-stack/hookah-guest-bot1.git
-            --branch main
-            --runtime python
-            --build-command "pip install -r requirements.txt"
-            --start-command "python bot.py"
-            --plan starter
-            --region frankfurt
-            --auto-deploy
-            --output json
-          )
+          put_env() {
+            local key="$1"
+            local value="$2"
+            curl --fail --silent --show-error --request PUT \
+              --url "${API}/env-vars/${key}" \
+              --header "Authorization: Bearer ${RENDER_API_KEY}" \
+              --header "accept: application/json" \
+              --header "content-type: application/json" \
+              --data "$(python -c 'import json,sys; print(json.dumps({"value":sys.argv[1]}))' "${value}")" \
+              >/dev/null
+            echo "Configured ${key}"
+          }
 
-          [ -n "${BOT_TOKEN:-}" ] && args+=(--env-var "BOT_TOKEN=$BOT_TOKEN")
-          [ -n "${OPENROUTER_API_KEY:-}" ] && args+=(--env-var "OPENROUTER_API_KEY=$OPENROUTER_API_KEY")
-          [ -n "${SUPABASE_URL:-}" ] && args+=(--env-var "SUPABASE_URL=$SUPABASE_URL")
-          [ -n "${SUPABASE_KEY:-}" ] && args+=(--env-var "SUPABASE_KEY=$SUPABASE_KEY")
-          args+=(--env-var "OPENROUTER_MODEL=openrouter/free")
-          args+=(--env-var "WHISPER_MODEL=tiny")
+          put_env "BOT_TOKEN" "${BOT_TOKEN}"
+          [ -n "${OPENROUTER_API_KEY:-}" ] && put_env "OPENROUTER_API_KEY" "${OPENROUTER_API_KEY}" || true
+          [ -n "${SUPABASE_URL:-}" ] && put_env "SUPABASE_URL" "${SUPABASE_URL}" || true
+          [ -n "${SUPABASE_KEY:-}" ] && put_env "SUPABASE_KEY" "${SUPABASE_KEY}" || true
+          put_env "OPENROUTER_MODEL" "openrouter/free"
+          put_env "WHISPER_MODEL" "tiny"
 
-          render services create "${args[@]}"
+          curl --fail --silent --show-error --request PATCH \
+            --url "${API}" \
+            --header "Authorization: Bearer ${RENDER_API_KEY}" \
+            --header "accept: application/json" \
+            --header "content-type: application/json" \
+            --data '{"healthCheckPath":"/"}' \
+            >/dev/null
 
-      - name: Verify Render worker
-        env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-        run: |
-          set -euo pipefail
-          render workspace set tea-db15t6ugekts73cbrjhg
-          render services --output json | grep -q '"name":"hookah-guest-bot1-worker"'
-          echo "Render worker exists."
+          echo "Starting Render deploy..."
+          curl --fail --silent --show-error --request POST \
+            --url "${API}/deploys" \
+            --header "Authorization: Bearer ${RENDER_API_KEY}" \
+            --header "accept: application/json" \
+            --header "content-type: application/json" \
+            --data '{"clearCache":"do_not_clear","deployMode":"build_and_deploy"}'
