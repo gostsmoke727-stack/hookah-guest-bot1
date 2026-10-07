@@ -1184,7 +1184,8 @@ async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
 
-    start_health_server()
+    if os.getenv("RENDER_HEALTH_ALREADY_RUNNING") != "1":
+        start_health_server()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
