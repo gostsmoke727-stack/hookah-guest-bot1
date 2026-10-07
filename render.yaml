@@ -23,4 +23,6 @@ services:
       - key: SUPABASE_KEY
         sync: false
       - key: WHISPER_MODEL
-        value: tiny
+        value: base
+      - key: WEBAPP_URL
+        value: https://hookah-guest-bot1.onrender.com/webapp/index.html
