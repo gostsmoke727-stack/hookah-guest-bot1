@@ -59,7 +59,8 @@ jobs:
           [ -n "${SUPABASE_URL:-}" ] && put_env "SUPABASE_URL" "${SUPABASE_URL}" || true
           [ -n "${SUPABASE_KEY:-}" ] && put_env "SUPABASE_KEY" "${SUPABASE_KEY}" || true
           put_env "OPENROUTER_MODEL" "openrouter/free"
-          put_env "WHISPER_MODEL" "tiny"
+          put_env "WHISPER_MODEL" "base"
+          put_env "WEBAPP_URL" "https://hookah-guest-bot1.onrender.com/webapp/index.html"
 
           curl --fail --silent --show-error --request PATCH \
             --url "${API}" \
