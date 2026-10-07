@@ -59,7 +59,7 @@ jobs:
             --header "Authorization: Bearer ${RENDER_API_KEY}" \
             --header "accept: application/json" \
             --header "content-type: application/json" \
-            --data '{"healthCheckPath":"/"}' \
+            --data '{"serviceDetails":{"healthCheckPath":"/","startCommand":"python -u bot.py"}}' \
             >/dev/null
 
           echo "Cancelling stale Render deploys..."
