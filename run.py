@@ -18,7 +18,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
-        if path in {"/", "/webapp", "/webapp/"}:
+        if path in {"/webapp", "/webapp/", "/"}:
             path = "/webapp/index.html"
         if path == "/webapp/index.html":
             try:
