@@ -53,7 +53,7 @@ def start_health_server():
 
         def do_GET(self):
             path = urllib.parse.urlparse(self.path).path
-            if path in {"/", "/webapp", "/webapp/"}:
+            if path in {"/webapp", "/webapp/", "/"}:
                 path = "/webapp/index.html"
             if path == "/webapp/index.html":
                 try:
@@ -61,6 +61,9 @@ def start_health_server():
                     self._send(body, "text/html; charset=utf-8")
                 except OSError:
                     self._send(b"Mini App file is unavailable", "text/plain; charset=utf-8", 500)
+                return
+            if path == "/health":
+                self._send(b'{"status":"ok","service":"hookah-guest-bot1"}', "application/json; charset=utf-8")
                 return
             self._send(b'{"status":"ok","service":"hookah-guest-bot1"}', "application/json; charset=utf-8")
 
@@ -347,6 +350,8 @@ async def ai_understand(session, user_text):
         "\nИСТОРИЯ:\n" + json.dumps(session["history"][-10:], ensure_ascii=False) +
         "\nСООБЩЕНИЕ ГОСТЯ:\n" + user_text
     )
+    # Запускаем Gemini и OpenRouter ПАРАЛЛЕЛЬНО, а не по очереди — раньше ожидание
+    # могло доходить до 50 секунд (25с + 25с), если первый провайдер не отвечал.
     tasks = []
     if GEMINI_API_KEY:
         tasks.append(asyncio.create_task(asyncio.to_thread(gemini_text_request, AI_SYSTEM, prompt)))
@@ -355,21 +360,21 @@ async def ai_understand(session, user_text):
     if not tasks:
         return None
     try:
-        for pending in asyncio.as_completed(tasks, timeout=AI_REQUEST_TIMEOUT + 2):
+        for coro in asyncio.as_completed(tasks, timeout=AI_REQUEST_TIMEOUT + 2):
             try:
-                result = await pending
+                result = await coro
             except Exception:
                 continue
             if result:
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
                 return result
     except asyncio.TimeoutError:
-        logger.warning("ai_understand: providers timed out; falling back to local parser")
-    for task in tasks:
-        if not task.done():
-            task.cancel()
+        logger.warning("ai_understand: both providers timed out, falling back to local parser")
+    for t in tasks:
+        if not t.done():
+            t.cancel()
     return None
 
 def canonical_term(term):
