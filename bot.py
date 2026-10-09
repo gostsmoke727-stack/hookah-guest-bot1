@@ -314,6 +314,8 @@ def parse_ai_json(text):
         match=re.search(r"\{.*\}",text,flags=re.S)
         return json.loads(match.group(0)) if match else None
 
+AI_REQUEST_TIMEOUT = 12
+
 def gemini_text_request(system_prompt,user_prompt):
     if not GEMINI_API_KEY: return None
     payload={"system_instruction":{"parts":[{"text":system_prompt}]},"contents":[{"role":"user","parts":[{"text":user_prompt}]}],"generationConfig":{"temperature":0.2,"maxOutputTokens":280}}
