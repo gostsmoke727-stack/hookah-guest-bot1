@@ -53,7 +53,7 @@ def start_health_server():
 
         def do_GET(self):
             path = urllib.parse.urlparse(self.path).path
-            if path in {"/webapp", "/webapp/"}:
+            if path in {"/", "/webapp", "/webapp/"}:
                 path = "/webapp/index.html"
             if path == "/webapp/index.html":
                 try:
@@ -107,6 +107,7 @@ AI_SYSTEM = """
 Ты — AI-мастер кальяна премиального заведения. Веди живой разговор, а не анкету.
 
 Правила:
+- Мат, грубая и неформальная речь — это нормальное обращение гостя, а не повод игнорировать запрос или отказываться отвечать. Извлекай смысл как из обычной фразы, мат используй только как усилитель эмоции ("охрененно крепкий" = очень крепкий), не включай нецензурные слова в свой "reply".
 - Явное "не хочу", "не люблю", "без", аллергия = абсолютный запрет.
 - Не возвращай запрещённое в desired_terms.
 - Не выдумывай наличие, бренды, вкусы или рецепты: каталог проверяется кодом.
@@ -319,7 +320,7 @@ def gemini_text_request(system_prompt,user_prompt):
     url="https://generativelanguage.googleapis.com/v1beta/models/"+GEMINI_MODEL+":generateContent?key="+urllib.parse.quote(GEMINI_API_KEY)
     req=urllib.request.Request(url,data=json.dumps(payload,ensure_ascii=False).encode(),headers={"Content-Type":"application/json"},method="POST")
     try:
-        with urllib.request.urlopen(req,timeout=25) as response: data=json.loads(response.read().decode())
+        with urllib.request.urlopen(req,timeout=AI_REQUEST_TIMEOUT) as response: data=json.loads(response.read().decode())
         parts=data.get("candidates",[{}])[0].get("content",{}).get("parts",[])
         return parse_ai_json("".join(str(p.get("text","")) for p in parts if p.get("text")))
     except Exception as e:
@@ -331,7 +332,7 @@ def openrouter_request(system_prompt,user_prompt):
     payload={"model":OPENROUTER_MODEL,"messages":[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],"temperature":0.2,"max_tokens":280}
     req=urllib.request.Request("https://openrouter.ai/api/v1/chat/completions",data=json.dumps(payload,ensure_ascii=False).encode(),headers={"Content-Type":"application/json","Authorization":"Bearer "+OPENROUTER_API_KEY,"HTTP-Referer":"https://github.com/gostsmoke727-stack/hookah-guest-bot1","X-Title":"Hookah Guest Bot"},method="POST")
     try:
-        with urllib.request.urlopen(req,timeout=25) as response: data=json.loads(response.read().decode())
+        with urllib.request.urlopen(req,timeout=AI_REQUEST_TIMEOUT) as response: data=json.loads(response.read().decode())
         return parse_ai_json(data["choices"][0]["message"]["content"])
     except Exception as e:
         logger.warning("OpenRouter request failed: %s", e)
@@ -344,7 +345,30 @@ async def ai_understand(session, user_text):
         "\nИСТОРИЯ:\n" + json.dumps(session["history"][-10:], ensure_ascii=False) +
         "\nСООБЩЕНИЕ ГОСТЯ:\n" + user_text
     )
-    return await asyncio.to_thread(gemini_text_request, AI_SYSTEM, prompt) or await asyncio.to_thread(openrouter_request, AI_SYSTEM, prompt)
+    tasks = []
+    if GEMINI_API_KEY:
+        tasks.append(asyncio.create_task(asyncio.to_thread(gemini_text_request, AI_SYSTEM, prompt)))
+    if OPENROUTER_API_KEY:
+        tasks.append(asyncio.create_task(asyncio.to_thread(openrouter_request, AI_SYSTEM, prompt)))
+    if not tasks:
+        return None
+    try:
+        for pending in asyncio.as_completed(tasks, timeout=AI_REQUEST_TIMEOUT + 2):
+            try:
+                result = await pending
+            except Exception:
+                continue
+            if result:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                return result
+    except asyncio.TimeoutError:
+        logger.warning("ai_understand: providers timed out; falling back to local parser")
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    return None
 
 def canonical_term(term):
     t = norm(term)
