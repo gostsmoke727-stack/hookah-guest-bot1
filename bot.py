@@ -33,6 +33,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://hookah-guest-bot1.onrender.com/webapp/index.html").strip()
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", force=True)
 logger = logging.getLogger("hookah_bot")
 
 def start_health_server():
@@ -1323,6 +1324,13 @@ async def main():
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
+    try:
+        me = await bot.get_me()
+        logger.info("Telegram bot authenticated: @%s (id=%s)", me.username, me.id)
+    except Exception:
+        logger.exception("Telegram authentication failed; check BOT_TOKEN and network access")
+        raise
+
     await bot.set_my_commands([
         {"command": "start", "description": "Начать подбор"},
         {"command": "menu", "description": "Меню команд"},
@@ -1580,8 +1588,17 @@ async def main():
         if text:
             await handle_turn(bot, message, text)
 
-    await dp.start_polling(bot)
+    logger.info("Starting Telegram long polling")
+    try:
+        await dp.start_polling(bot)
+    except Exception:
+        logger.exception("Telegram polling stopped with an error")
+        raise
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception:
+        logger.exception("Bot process exited unexpectedly")
+        raise
