@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("otvet")
 
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
 AI_BASE_URL = os.environ.get("AI_BASE_URL") or None
 AI_MODEL = os.environ.get("AI_MODEL", "gpt-4o-mini")
@@ -112,7 +112,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await q.message.reply_text(await ask_ai(text, context.user_data.get("style",""), True), reply_markup=menu())
 
-telegram_app = Application.builder().token(BOT_TOKEN).build()
+telegram_app = Application.builder().token(BOT_TOKEN or "000000:TEST_TOKEN_NOT_SET").build()
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_cmd))
 telegram_app.add_handler(CommandHandler("reset", reset))
