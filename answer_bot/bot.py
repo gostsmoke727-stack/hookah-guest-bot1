@@ -112,24 +112,29 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await q.message.reply_text(await ask_ai(text, context.user_data.get("style",""), True), reply_markup=menu())
 
-telegram_app = Application.builder().token(BOT_TOKEN or "000000:TEST_TOKEN_NOT_SET").build()
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("help", help_cmd))
-telegram_app.add_handler(CommandHandler("reset", reset))
-telegram_app.add_handler(CallbackQueryHandler(buttons))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-telegram_app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
+telegram_app = Application.builder().token(BOT_TOKEN).build() if BOT_TOKEN else None
+if telegram_app:
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("help", help_cmd))
+    telegram_app.add_handler(CommandHandler("reset", reset))
+    telegram_app.add_handler(CallbackQueryHandler(buttons))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    telegram_app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await telegram_app.initialize()
-    await telegram_app.start()
-    await telegram_app.updater.start_polling(drop_pending_updates=True)
-    log.info("Answer bot polling started")
+    if telegram_app:
+        await telegram_app.initialize()
+        await telegram_app.start()
+        await telegram_app.updater.start_polling(drop_pending_updates=True)
+        log.info("Answer bot polling started")
+    else:
+        log.warning("TELEGRAM_BOT_TOKEN is not configured; health endpoint only")
     yield
-    await telegram_app.updater.stop()
-    await telegram_app.stop()
-    await telegram_app.shutdown()
+    if telegram_app:
+        await telegram_app.updater.stop()
+        await telegram_app.stop()
+        await telegram_app.shutdown()
 
 app = FastAPI(title="Ответь test bot", lifespan=lifespan)
 
